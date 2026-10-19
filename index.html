@@ -132,6 +132,14 @@
           <h3 class="text-xs uppercase tracking-[.14em] text-muted font-semibold mb-2">Orientare</h3>
           <div id="orient-list" class="flex flex-wrap gap-1.5"></div>
         </div>
+        <div id="color-filter-wrap" hidden>
+          <h3 class="text-xs uppercase tracking-[.14em] text-muted font-semibold mb-2">Culori</h3>
+          <div id="color-filter" class="flex flex-wrap gap-1.5"></div>
+        </div>
+        <div id="flower-filter-wrap" hidden>
+          <h3 class="text-xs uppercase tracking-[.14em] text-muted font-semibold mb-2">Flori</h3>
+          <div id="flower-filter" class="flex flex-wrap gap-1.5"></div>
+        </div>
         <div>
           <h3 class="text-xs uppercase tracking-[.14em] text-muted font-semibold mb-2">Tag-uri</h3>
           <div id="tag-cloud" class="flex flex-wrap gap-1.5"></div>
@@ -213,6 +221,17 @@
             <input name="title" required placeholder="Titlu" class="w-full font-serif text-xl bg-transparent border-b border-transparent hover:border-line focus:border-moss outline-none py-1" />
             <label class="block text-sm"><span class="text-muted">Categorie</span>
               <select name="category_id" class="cat-select mt-1 w-full rounded-lg border border-line bg-paper px-3 py-2"></select></label>
+            <div id="detail-product" class="space-y-3 rounded-xl bg-blush-soft/50 border border-blush/40 p-3" hidden>
+              <div class="text-sm"><span class="text-muted">Flori în imagine</span>
+                <div id="detail-flowers" class="mt-1"></div></div>
+              <div class="text-sm">
+                <div class="flex items-center justify-between">
+                  <span class="text-muted">Culori <span id="colors-mode" class="ml-1 text-[11px] px-1.5 py-0.5 rounded-full"></span></span>
+                  <button type="button" id="colors-detect" class="text-xs text-moss hover:underline">↻ Detectează automat</button>
+                </div>
+                <div id="detail-colors" class="mt-1.5 flex flex-wrap gap-1.5"></div>
+              </div>
+            </div>
             <div class="text-sm"><span class="text-muted">Tag-uri</span>
               <div class="tag-input mt-1" data-name="tags"></div></div>
             <label class="block text-sm"><span class="text-muted">Text alternativ (SEO)</span>
@@ -267,6 +286,11 @@
           <p class="text-xs uppercase tracking-[.14em] text-muted font-semibold">Se aplică tuturor</p>
           <label class="block"><span class="text-muted">Categorie *</span>
             <select id="up-category" class="cat-select mt-1 w-full rounded-lg border border-line bg-paper px-3 py-2"></select></label>
+          <div id="up-product" class="rounded-xl bg-blush-soft/50 border border-blush/40 p-3 space-y-1" hidden>
+            <span class="text-muted">Flori în imagine</span>
+            <div id="up-flowers"></div>
+            <p class="text-xs text-muted pt-1">Culorile se detectează automat pentru fiecare poză și le poți corecta după.</p>
+          </div>
           <div><span class="text-muted">Tag-uri</span>
             <div class="tag-input mt-1" id="up-tags"></div></div>
           <label class="block"><span class="text-muted">Credit foto</span>
@@ -300,6 +324,7 @@
 
   <div id="toasts" class="fixed bottom-5 right-5 z-[60] space-y-2"></div>
   <datalist id="tag-suggestions"></datalist>
+  <datalist id="flower-suggestions"></datalist>
 
   <script type="module" src="js/app.js"></script>
 </body>

@@ -14,6 +14,7 @@ Bibliotecă internă de imagini (produse, branding, interior/exterior magazin, e
 - **Filtre:** categorie, orientare, tag-uri (cumulative). Sortare.
 - **Link public direct** pentru site/Shopify/newsletter, plus snippet HTML (`<img>` cu alt, width, height) și Markdown — util și pentru blog.
 - **Download în formate:** Web 1600, Instagram 1:1 și 4:5, Story 9:16, Facebook/link 1200×630, Banner 1920×800. Crop-ul se face în jurul **punctului de focus** (click pe imagine în fereastra de detaliu).
+- **Produse — flori și culori:** la categoria *Produse* alegi florile din imagine (listă care crește singură când adaugi flori noi), iar culorile buchetului se detectează automat la upload (fundalul și verdeața sunt ignorate). Le poți corecta manual din fereastra de detaliu; „↻ Detectează automat” revine la sugestia automată. Filtre pe culori și flori în sidebar; căutarea găsește și după flori/culori.
 - **Selecție multiplă:** adaugă tag, mută în categorie, descarcă ZIP, șterge.
 - Link direct către o imagine pentru colegi: `media.theflowerstation.ro/#a=<id>`.
 - Indicator de spațiu folosit în sidebar.
