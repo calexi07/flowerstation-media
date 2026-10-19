@@ -3,7 +3,7 @@
 // =============================================================
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import {
-  SUPABASE_URL, SUPABASE_ANON_KEY, BUCKET, STORAGE_QUOTA_BYTES, EXPORT_FORMATS,
+  SUPABASE_URL, SUPABASE_ANON_KEY, BUCKET, STORAGE_QUOTA_BYTES, EXPORT_FORMATS, MASTER_MAX,
 } from './config.js';
 import {
   sha256, decode, decodeUrl, hasAlpha, dominantColor, makeMaster, makeThumb, exportFormat,
@@ -101,6 +101,7 @@ const state = {
   productFields: false, // true după ce s-a rulat migrarea 02 (flori + culori)
   assets: [],
   filter: { q: '', cat: null, orient: null, tags: new Set(), flowers: new Set(), colors: new Set(), sort: 'new' },
+  view: 'library',     // 'library' sau 'review' (De revizuit)
   selectMode: false,
   selected: new Set(),
   list: [],           // rezultatul filtrat curent
@@ -311,16 +312,24 @@ async function loadAll() {
   }
   $('#loading').hidden = true;
   render();
+  const n = reviewAssets().length;
+  if (n && state.view !== 'review') toast(`📱 ${n} ${n === 1 ? 'poză nouă' : 'poze noi'} de pe telefon în „De revizuit”`);
+  processPending();
 }
 
 const catName = id => state.categories.find(c => c.id === id)?.name ?? '—';
+const inReview = a => a.status === 'review';
+const libraryAssets = () => state.assets.filter(a => !inReview(a));
+const reviewAssets = () => state.assets.filter(inReview);
 
 // ---------------------------------------------------------------- filter + render
 function applyFilter() {
   const f = state.filter;
   const terms = norm(f.q).split(/\s+/).filter(Boolean);
+  const review = state.view === 'review';
   let list = state.assets.filter(a => {
-    if (f.cat && a.category_id !== f.cat) return false;
+    if (review !== inReview(a)) return false;
+    if (!review && f.cat && a.category_id !== f.cat) return false;
     if (f.orient && orientationOf(a) !== f.orient) return false;
     for (const t of f.tags) if (!a.tags.includes(t)) return false;
     for (const fl of f.flowers) if (!(a.flowers || []).includes(fl)) return false;
@@ -333,7 +342,7 @@ function applyFilter() {
     return true;
   });
   const by = {
-    new: (a, b) => b.created_at.localeCompare(a.created_at),
+    new: (a, b) => (b.taken_at || b.created_at).localeCompare(a.taken_at || a.created_at),
     old: (a, b) => a.created_at.localeCompare(b.created_at),
     az:  (a, b) => a.title.localeCompare(b.title, 'ro'),
     big: (a, b) => b.width * b.height - a.width * a.height,
@@ -350,7 +359,10 @@ function render() {
   appendCards();
   const none = state.list.length === 0;
   $('#empty').hidden = !none || !$('#loading').hidden;
-  if (none) {
+  if (none && state.view === 'review') {
+    $('#empty-title').textContent = 'Nimic de revizuit';
+    $('#empty-sub').textContent = 'Pozele trimise de pe iPhone apar aici până decizi dacă le păstrezi.';
+  } else if (none) {
     const anyAssets = state.assets.length > 0;
     $('#empty-title').textContent = anyAssets ? 'Niciun rezultat' : 'Nicio imagine încă';
     $('#empty-sub').textContent = anyAssets ? 'Încearcă alți termeni sau scoate din filtre.' : 'Trage poze oriunde pe pagină sau apasă „Încarcă”.';
@@ -364,12 +376,19 @@ function cardHtml(a) {
   return `
   <div class="card relative rounded-[14px] overflow-hidden bg-paper shadow-card ${sel ? 'selected' : ''}" data-id="${a.id}">
     <button class="open block w-full ${transparent ? 'checker' : ''}" style="aspect-ratio:${a.width}/${a.height};background-color:${transparent ? '' : esc(a.color || '#efe9e1')}" aria-label="${esc(a.title)}">
-      <img src="${publicUrl(a.thumb_path)}" alt="${esc(a.alt_text || a.title)}" loading="lazy" decoding="async" class="w-full h-full object-cover" />
+      ${a.processed === false && /heic/.test(a.mime)
+        ? '<span class="w-full h-full min-h-[160px] grid place-items-center text-xs text-muted"><span><span class="spin inline-block">◌</span> Pregătesc…</span></span>'
+        : `<img src="${publicUrl(a.thumb_path)}" alt="${esc(a.alt_text || a.title)}" loading="lazy" decoding="async" class="w-full h-full object-cover" />`}
     </button>
+    ${inReview(a) ? `
+    <div class="absolute bottom-0 inset-x-0 p-2 flex gap-1.5 bg-gradient-to-t from-ink/80 to-transparent pt-8">
+      <button class="rv-keep flex-1 rounded-full bg-moss hover:bg-moss-dark text-white text-xs font-medium py-1.5">✓ Păstrează</button>
+      <button class="rv-drop rounded-full bg-white/90 hover:bg-white text-blush-dark text-xs font-medium px-3 py-1.5">✕ Șterge</button>
+    </div>` : ''}
     <div class="overlay pointer-events-none absolute inset-0 bg-gradient-to-t from-ink/70 via-transparent to-ink/10"></div>
     <button class="sel overlay absolute top-2 left-2 w-7 h-7 rounded-full grid place-items-center text-xs border-2 ${sel ? 'bg-moss border-moss text-white' : 'bg-white/80 border-white text-transparent hover:text-moss'}" aria-label="Selectează">✓</button>
     <button class="cp overlay absolute top-2 right-2 h-7 px-2.5 rounded-full bg-white/90 text-ink text-xs font-medium hover:bg-white" title="Copiază link public">Link</button>
-    <div class="overlay pointer-events-none absolute bottom-0 inset-x-0 p-3 text-white">
+    <div class="overlay pointer-events-none absolute bottom-0 inset-x-0 p-3 text-white ${inReview(a) ? 'hidden' : ''}">
       <p class="text-sm font-medium leading-tight line-clamp-2">${esc(a.title)}</p>
       <p class="text-[11px] opacity-80 mt-0.5">${esc((a.flowers || []).length ? a.flowers.join(', ') : catName(a.category_id))} · ${a.width}×${a.height}</p>
       ${(a.colors || []).length ? `<div class="flex gap-1 mt-1.5">${a.colors.map(id => colorById(id)).filter(Boolean)
@@ -393,13 +412,20 @@ function appendCards() {
 }
 
 function renderSidebar() {
+  const lib = libraryAssets();
   const counts = new Map();
-  for (const a of state.assets) counts.set(a.category_id, (counts.get(a.category_id) || 0) + 1);
+  for (const a of lib) counts.set(a.category_id, (counts.get(a.category_id) || 0) + 1);
+  const nReview = state.assets.length - lib.length;
+  const isLib = state.view !== 'review';
   const item = (id, name, n) => `
     <button data-cat="${id ?? ''}" class="w-full flex justify-between items-center px-3 py-2 rounded-lg text-sm ${
-      state.filter.cat === id ? 'bg-moss text-white' : 'hover:bg-line/50'}">
-      <span class="truncate">${esc(name)}</span><span class="text-xs ${state.filter.cat === id ? 'text-white/80' : 'text-muted'}">${n}</span></button>`;
-  $('#cat-list').innerHTML = item(null, 'Toate', state.assets.length) +
+      isLib && state.filter.cat === id ? 'bg-moss text-white' : 'hover:bg-line/50'}">
+      <span class="truncate">${esc(name)}</span><span class="text-xs ${isLib && state.filter.cat === id ? 'text-white/80' : 'text-muted'}">${n}</span></button>`;
+  const reviewItem = nReview || !isLib ? `
+    <button data-review class="w-full flex justify-between items-center px-3 py-2 mb-2 rounded-lg text-sm font-medium ${
+      !isLib ? 'bg-blush-dark text-white' : 'bg-blush-soft text-blush-dark hover:bg-blush/40'}">
+      <span>📱 De revizuit</span><span class="text-xs min-w-[22px] text-center rounded-full px-1.5 py-0.5 ${!isLib ? 'bg-white/25' : 'bg-blush-dark text-white'}">${nReview}</span></button>` : '';
+  $('#cat-list').innerHTML = reviewItem + item(null, 'Toate', lib.length) +
     state.categories.map(c => item(c.id, c.name, counts.get(c.id) || 0)).join('');
 
   const orients = [[null, 'Toate'], ['landscape', 'Peisaj'], ['portrait', 'Portret'], ['square', 'Pătrat']];
@@ -408,7 +434,7 @@ function renderSidebar() {
       state.filter.orient === v ? 'bg-ink text-white border-ink' : 'border-line bg-paper hover:bg-cream'}">${l}</button>`).join('');
 
   const freq = new Map();
-  for (const a of state.assets) for (const t of a.tags) freq.set(t, (freq.get(t) || 0) + 1);
+  for (const a of lib) for (const t of a.tags) freq.set(t, (freq.get(t) || 0) + 1);
   const top = [...freq].sort((a, b) => b[1] - a[1]).slice(0, 40);
   $('#tag-cloud').innerHTML = top.length ? top.map(([t, n]) => `
     <button data-tag="${esc(t)}" class="text-xs px-2.5 py-1 rounded-full ${
@@ -418,13 +444,13 @@ function renderSidebar() {
 
   // culori & flori (din pozele care le au)
   const colorCounts = new Map(), flowerCounts = new Map();
-  for (const a of state.assets) {
+  for (const a of lib) {
     for (const c of a.colors || []) colorCounts.set(c, (colorCounts.get(c) || 0) + 1);
     for (const fl of a.flowers || []) flowerCounts.set(fl, (flowerCounts.get(fl) || 0) + 1);
   }
-  $('#color-filter-wrap').hidden = !colorCounts.size;
+  $('#color-filter-wrap').hidden = !colorCounts.size || !isLib;
   $('#color-filter').innerHTML = colorSwatches([...state.filter.colors], { size: 'w-6 h-6', counts: colorCounts });
-  $('#flower-filter-wrap').hidden = !flowerCounts.size;
+  $('#flower-filter-wrap').hidden = !flowerCounts.size || !isLib;
   $('#flower-filter').innerHTML = [...flowerCounts].sort((a, b) => b[1] - a[1]).slice(0, 30).map(([fl, n]) => `
     <button data-flower="${esc(fl)}" class="text-xs px-2.5 py-1 rounded-full ${
       state.filter.flowers.has(fl) ? 'bg-blush-dark text-white' : 'bg-blush-soft text-blush-dark hover:bg-blush/40'}">${esc(fl)} <span class="opacity-60">${n}</span></button>`).join('');
@@ -438,7 +464,7 @@ function renderSidebar() {
 
 function renderToolbar() {
   const f = state.filter;
-  $('#view-title').textContent = f.cat ? catName(f.cat) : 'Toate imaginile';
+  $('#view-title').textContent = state.view === 'review' ? 'De revizuit' : f.cat ? catName(f.cat) : 'Toate imaginile';
   $('#result-count').textContent = `${state.list.length} ${state.list.length === 1 ? 'imagine' : 'imagini'}`;
   const chips = [];
   if (f.q) chips.push(['q', `„${f.q}”`]);
@@ -452,7 +478,11 @@ function renderToolbar() {
 
 // sidebar & toolbar events
 $('#cat-list').addEventListener('click', e => {
+  if (e.target.closest('[data-review]')) {
+    state.view = 'review'; state.selected.clear(); closeSidebar(); return render();
+  }
   const b = e.target.closest('[data-cat]'); if (!b) return;
+  if (state.view === 'review') { state.view = 'library'; state.selected.clear(); }
   state.filter.cat = b.dataset.cat ? Number(b.dataset.cat) : null;
   closeSidebar(); render();
 });
@@ -518,6 +548,8 @@ $('#grid').addEventListener('click', e => {
   const card = e.target.closest('.card'); if (!card) return;
   const id = card.dataset.id;
   const a = state.assets.find(x => x.id === id);
+  if (e.target.closest('.rv-keep')) return approveAssets([a]);
+  if (e.target.closest('.rv-drop')) return rejectAssets([a]);
   if (e.target.closest('.cp')) return copyText(publicUrl(a.master_path), 'Link copiat');
   if (e.target.closest('.sel') || state.selectMode || e.metaKey || e.ctrlKey || e.shiftKey) return toggleSelect(id, card);
   openDetail(id);
@@ -536,8 +568,14 @@ function renderBulkBar() {
   $('#bulk-bar').hidden = !state.selectMode;
   $('#bulk-count').textContent = n ? `${n} ${n === 1 ? 'selectată' : 'selectate'}` : 'Alege imagini';
   $('#select-mode-btn').textContent = state.selectMode ? 'Gata' : 'Selectează';
+  if (!$('#bulk-bar [data-bulk="approve"]')) {
+    $('#bulk-count').insertAdjacentHTML('afterend', '<button data-bulk="approve" class="px-3 py-1.5 rounded-full bg-moss hover:bg-moss-dark">✓ Păstrează</button>');
+  }
+  const review = state.view === 'review';
   $$('#bulk-bar [data-bulk]').forEach(b => {
     if (!['all', 'cancel'].includes(b.dataset.bulk)) b.disabled = !n, b.style.opacity = n ? '' : '.4';
+    const k = b.dataset.bulk;
+    b.hidden = review ? ['tag', 'category'].includes(k) : k === 'approve';
   });
 }
 
@@ -552,6 +590,8 @@ $('#bulk-bar').addEventListener('click', async e => {
   const items = ids.map(id => state.assets.find(a => a.id === id)).filter(Boolean);
 
   if (act === 'cancel') return exitSelect();
+  if (act === 'approve') return approveAssets(items);
+  if (act === 'delete' && state.view === 'review') return rejectAssets(items);
   if (act === 'all') { state.list.forEach(a => state.selected.add(a.id)); return render(); }
 
   if (act === 'tag') {
@@ -622,7 +662,7 @@ $('#bulk-bar').addEventListener('click', async e => {
 });
 
 async function deleteAssets(items) {
-  const paths = items.flatMap(a => [a.master_path, a.thumb_path, a.original_path]).filter(Boolean);
+  const paths = [...new Set(items.flatMap(a => [a.master_path, a.thumb_path, a.original_path]).filter(Boolean))];
   const { error: e1 } = await sb.from('assets').delete().in('id', items.map(a => a.id));
   if (e1) { toast('Nu am putut șterge.', 'err'); return false; }
   const { error: e2 } = await store().remove(paths);
@@ -669,6 +709,8 @@ function openDetail(id) {
   if (state.productFields && isProduct(a.category_id) && !detailColors.length && !a.colors_manual) autoColors(a, true);
 
   ensureRenameUi();
+  ensureReviewBar();
+  $('#review-bar').hidden = !inReview(a);
   $('#detail-filename').textContent = a.master_path.split('/').pop();
   const ext = a.master_path.split('.').pop().toUpperCase();
   $('#detail-meta').textContent = `${a.width} × ${a.height} px · ${ext} · ${fmtBytes(a.size_bytes)}`;
@@ -1293,5 +1335,159 @@ document.addEventListener('keydown', e => {
   if (e.key === '/' && !typing && !document.querySelector('dialog[open]')) { e.preventDefault(); $('#search').focus(); }
   if (e.key === 'Escape' && state.selectMode && !document.querySelector('dialog[open]')) exitSelect();
 });
+
+
+// ---------------------------------------------------------------- De revizuit (poze de pe iPhone)
+/** Mută fișierele unei poze la un nume nou bazat pe titlu; întoarce câmpurile de actualizat. */
+async function moveFilesForTitle(a, title) {
+  const slug = slugify(title) || 'imagine';
+  const dir = a.master_path.slice(0, a.master_path.lastIndexOf('/'));
+  const target = `${dir}/${slug}.${a.master_path.split('.').pop()}`;
+  if (target === a.master_path) return {};
+  const { error } = await store().move(a.master_path, target);
+  if (error) throw error;
+  return a.thumb_path === a.master_path ? { master_path: target, thumb_path: target } : { master_path: target };
+}
+
+/**
+ * Poze venite de pe telefon: generează miniatura, culorile și (pentru HEIC / poze foarte mari)
+ * versiunea master optimizată. Rulează în fundal, câte una.
+ */
+let processing = false;
+async function processPending() {
+  if (processing) return;
+  processing = true;
+  try {
+    for (const a of state.assets.filter(x => x.processed === false)) {
+      try {
+        const dec = await decodeUrl(publicUrl(a.master_path));
+        const patch = { processed: true };
+        const dir = a.master_path.slice(0, a.master_path.lastIndexOf('/'));
+        const heic = /heic|heif/.test(a.mime);
+        const toRemove = [];
+        if (heic || Math.max(dec.width, dec.height) > MASTER_MAX) {
+          const master = await makeMaster(new File([], 'x.jpg', { type: 'image/jpeg' }), dec, false);
+          const path = `${a.master_path.replace(/\.[^.]+$/, '')}.jpg`;
+          const { error } = await store().upload(path, master.blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: true });
+          if (error) throw error;
+          if (path !== a.master_path) toRemove.push(a.master_path);
+          Object.assign(patch, { master_path: path, mime: 'image/jpeg', width: master.width, height: master.height, size_bytes: master.blob.size });
+        } else {
+          Object.assign(patch, { width: dec.width, height: dec.height });
+        }
+        const thumb = await makeThumb(dec, false);
+        const thumbPath = `${dir}/thumb.${thumb.ext}`;
+        const { error: te } = await store().upload(thumbPath, thumb.blob, { contentType: thumb.blob.type, cacheControl: '31536000', upsert: true });
+        if (te) throw te;
+        Object.assign(patch, { thumb_path: thumbPath, thumb_bytes: thumb.blob.size, color: dominantColor(dec) });
+        if (state.productFields) Object.assign(patch, { colors: detectColors(dec), colors_manual: false });
+        dec.source.close?.();
+        const { error: ue } = await sb.from('assets').update(patch).eq('id', a.id);
+        if (ue) throw ue;
+        if (toRemove.length) await store().remove(toRemove);
+        Object.assign(a, patch);
+        const card = $(`.card[data-id="${a.id}"]`);
+        if (card) card.outerHTML = cardHtml(a);
+      } catch (err) {
+        console.error('Procesare eșuată pentru', a.title, err);
+      }
+    }
+  } finally { processing = false; }
+}
+
+/** Păstrează pozele în bibliotecă: alegi categoria (+ titlu, flori, tag-uri). */
+async function approveAssets(items) {
+  if (!items.length) return;
+  const single = items.length === 1 ? items[0] : null;
+  const opts = state.categories.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  let flowersBox, tagsBox;
+  const res = await ask({
+    title: single ? 'Păstrează în bibliotecă' : `Păstrează ${items.length} poze în bibliotecă`,
+    ok: '✓ Păstrează',
+    body: `
+      <div class="space-y-3 text-sm">
+        ${single ? `<label class="block"><span class="text-muted">Titlu</span>
+          <input name="t" class="mt-1 w-full rounded-lg border border-line px-3 py-2" value="${esc(single.title.replace(/\s*\(.*\)$/, ''))}" /></label>` : ''}
+        <label class="block"><span class="text-muted">Categorie *</span>
+          <select name="c" class="mt-1 w-full rounded-lg border border-line bg-paper px-3 py-2">
+            <option value="" disabled selected>Alege categoria…</option>${opts}</select></label>
+        <div class="ap-flowers" hidden><span class="text-muted">Flori în imagine</span><div class="mt-1 fl"></div></div>
+        <div><span class="text-muted">Tag-uri</span><div class="mt-1 tg"></div></div>
+      </div>`,
+    onOpen: b => {
+      flowersBox = flowerInput($('.fl', b), []);
+      tagsBox = tagInput($('.tg', b), []);
+      const sel = $('select', b);
+      const sync = () => { $('.ap-flowers', b).hidden = !(state.productFields && isProduct(Number(sel.value))); };
+      sel.addEventListener('change', sync);
+      setTimeout(() => (single ? $('input[name=t]', b) : sel).focus(), 50);
+    },
+    collect: b => ({
+      title: single ? $('input[name=t]', b).value.trim() : null,
+      cat: Number($('select', b).value) || null,
+      flowers: flowersBox.get(), tags: tagsBox.get(),
+    }),
+  });
+  if (!res) return;
+  if (!res.cat) return toast('Alege o categorie ca să păstrezi poza.', 'err');
+
+  const product = state.productFields && isProduct(res.cat);
+  if (product && res.flowers.length) rememberFlowers(res.flowers);
+  let ok = 0;
+  for (const a of items) {
+    try {
+      const patch = { status: 'approved', category_id: res.cat, tags: [...new Set([...a.tags, ...res.tags])] };
+      if (state.productFields) {
+        patch.flowers = product ? [...new Set([...(a.flowers || []), ...res.flowers])] : [];
+        if (!product) patch.colors = [];
+      }
+      if (single && res.title && res.title !== a.title) {
+        patch.title = res.title;
+        Object.assign(patch, await moveFilesForTitle(a, res.title));
+      }
+      const { error } = await sb.from('assets').update(patch).eq('id', a.id);
+      if (error) throw error;
+      Object.assign(a, patch);
+      state.selected.delete(a.id);
+      ok++;
+    } catch (err) { console.error(err); }
+  }
+  toast(ok === items.length ? `✓ ${ok} ${ok === 1 ? 'poză păstrată' : 'poze păstrate'} în bibliotecă` : `${items.length - ok} nu au putut fi salvate`, ok === items.length ? 'ok' : 'err');
+  if (detail.open && items.some(a => a.id === state.detailId)) detail.close();
+  if (state.view === 'review' && !reviewAssets().length) { state.view = 'library'; state.selectMode = false; }
+  render();
+}
+
+async function rejectAssets(items) {
+  if (!items.length) return;
+  const ok = await ask({
+    title: items.length === 1 ? 'Ștergi poza?' : `Ștergi ${items.length} poze?`, ok: 'Șterge', danger: true,
+    body: '<p class="text-sm text-muted">Pozele se șterg din bibliotecă. Pe telefon rămân neatinse.</p>',
+  });
+  if (!ok) return;
+  if (await deleteAssets(items)) {
+    toast(items.length === 1 ? 'Poză ștearsă' : `${items.length} poze șterse`);
+    if (detail.open && items.some(a => a.id === state.detailId)) detail.close();
+    if (state.view === 'review' && !reviewAssets().length) { state.view = 'library'; state.selectMode = false; }
+    render();
+  }
+}
+
+/** Banda din fereastra de detaliu pentru pozele în revizuire. */
+function ensureReviewBar() {
+  if (!$('#review-bar')) {
+    $('#detail-form').insertAdjacentHTML('beforebegin', `
+      <div id="review-bar" class="rounded-xl bg-blush-soft border border-blush/50 p-3 text-sm" hidden>
+        <p class="font-medium text-blush-dark">📱 Poză de pe telefon — de revizuit</p>
+        <p class="text-xs text-muted mt-0.5">Alege dacă intră în bibliotecă sau se șterge.</p>
+        <div class="flex gap-2 mt-2.5">
+          <button type="button" id="rv-keep" class="flex-1 rounded-full bg-moss hover:bg-moss-dark text-white text-sm py-2">✓ Păstrează</button>
+          <button type="button" id="rv-drop" class="rounded-full border border-blush text-blush-dark text-sm px-4 py-2 hover:bg-white">✕ Șterge</button>
+        </div>
+      </div>`);
+    $('#rv-keep').addEventListener('click', () => { const a = state.assets.find(x => x.id === state.detailId); if (a) approveAssets([a]); });
+    $('#rv-drop').addEventListener('click', () => { const a = state.assets.find(x => x.id === state.detailId); if (a) rejectAssets([a]); });
+  }
+}
 
 initAuth();
