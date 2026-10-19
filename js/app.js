@@ -1936,14 +1936,15 @@ function productCardHtml(p) {
 
     <div class="pv-strip mt-3 flex gap-2 overflow-x-auto scrollbar-thin rounded-xl border-2 border-dashed border-transparent p-1 -m-1 min-h-[96px]">
       ${imgs.map((a, i) => `
-        <div draggable="true" data-aid="${a.id}" class="pv-img relative shrink-0 w-24 h-24 rounded-lg overflow-hidden bg-cream cursor-grab">
-          <img src="${publicUrl(a.thumb_path)}" alt="" class="w-full h-full object-cover pointer-events-none" style="object-position:${Math.round((a.focal_x ?? .5) * 100)}% ${Math.round((a.focal_y ?? .5) * 100)}%" />
+        <div draggable="true" data-aid="${a.id}" title="Click: alege decupajul pătrat · Trage: mută / reordonează" class="pv-img relative shrink-0 w-24 h-24 rounded-lg overflow-hidden bg-cream cursor-pointer">
+          ${squarePreview(a, publicUrl(a.thumb_path))}
+          <span class="absolute top-1 left-1 text-[10px] px-1 rounded bg-white/85 text-ink">✂</span>
           ${i === 0 ? '<span class="absolute bottom-1 left-1 text-[10px] px-1.5 rounded bg-ink/80 text-white">principală</span>' : ''}
           <button type="button" class="pv-unlink absolute top-1 right-1 w-5 h-5 rounded-full bg-white/90 text-xs text-ink hover:bg-white" title="Scoate din produs">×</button>
         </div>`).join('')}
       <div class="shrink-0 w-24 h-24 rounded-lg border border-dashed border-line grid place-items-center text-[11px] text-muted text-center px-1">Trage poze aici</div>
     </div>
-    ${imgs.length ? '<p class="text-[11px] text-muted mt-1.5">Se exportă pătrate (cum le vezi aici). Dublu-click pe o poză → click pe zona importantă ca să muți decupajul.</p>' : ''}
+    ${imgs.length ? '<p class="text-[11px] text-muted mt-1.5">Se exportă pătrate, exact cum le vezi aici. Click pe o poză ca să muți floarea mai sus / mai jos sau să faci zoom.</p>' : ''}
 
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 text-sm">
       <label class="block ${p.has_variants ? 'opacity-40' : ''}"><span class="text-muted">Preț (lei)</span>
@@ -2126,7 +2127,7 @@ function bindProductsView() {
       return;
     }
     const img = e.target.closest('.pv-img');
-    if (img && e.detail === 2) openDetail(img.dataset.aid);
+    if (img) { const a = state.assets.find(x => x.id === img.dataset.aid); if (a) openCropEditor(a, p); }
   });
 
   // drag & drop: din tavă pe produs, între produse, reordonare în produs
@@ -2237,20 +2238,116 @@ function productCsvRows(p, statusOverride, squareUrls = {}) {
   return rows;
 }
 
+/** Zona pătrată decupată dintr-o poză (în pixelii pozei): centrată pe punctul de focus, micșorată de zoom. */
+function cropRect(a, W = a.width, H = a.height) {
+  const zoom = Math.max(1, a.crop_zoom || 1);
+  const side = Math.min(W, H) / zoom;
+  const fx = a.focal_x ?? 0.5, fy = a.focal_y ?? 0.5;
+  const x = Math.min(Math.max(fx * W - side / 2, 0), W - side);
+  const y = Math.min(Math.max(fy * H - side / 2, 0), H - side);
+  return { x, y, side, zoom };
+}
+
+/** Miniatură pătrată care arată exact decupajul exportat. */
+function squarePreview(a, src) {
+  const W = a.width || 1, H = a.height || 1, r = cropRect(a, W, H);
+  return `<img src="${src}" alt="" draggable="false" class="absolute max-w-none pointer-events-none select-none"
+    style="width:${(W / r.side) * 100}%;height:${(H / r.side) * 100}%;left:${(-r.x / r.side) * 100}%;top:${(-r.y / r.side) * 100}%" />`;
+}
+
+/** Editor de decupaj pătrat: tragi poza în cadru (sus/jos/stânga/dreapta) + zoom. */
+async function openCropEditor(a, product) {
+  const W = a.width, H = a.height;
+  if (!W || !H) return toast('Poza încă se procesează, încearcă peste câteva secunde.', 'err');
+  const st = { fx: a.focal_x ?? 0.5, fy: a.focal_y ?? 0.5, zoom: Math.max(1, a.crop_zoom || 1) };
+  const portrait = H > W * 1.02, landscape = W > H * 1.02;
+  let apply;
+  const res = await ask({
+    title: 'Decupaj pătrat pentru Shopify', ok: 'Salvează decupajul',
+    body: `
+      <p class="text-xs text-muted -mt-2 mb-3">Trage poza ${portrait ? 'în sus sau în jos' : landscape ? 'stânga sau dreapta' : 'în orice direcție (după zoom)'} ca floarea să stea unde vrei în pătrat.</p>
+      <div class="crop-vp relative mx-auto aspect-square w-full max-w-[340px] overflow-hidden rounded-xl bg-cream touch-none cursor-grab select-none">
+        <img src="${publicUrl(a.master_path)}" alt="" draggable="false" class="crop-img absolute max-w-none pointer-events-none select-none" />
+        <div class="pointer-events-none absolute inset-0 grid grid-cols-3 grid-rows-3">
+          ${'<div class="border border-white/40"></div>'.repeat(9)}</div>
+        <div class="pointer-events-none absolute left-1/2 top-1/2 w-5 h-5 -translate-x-1/2 -translate-y-1/2">
+          <div class="absolute left-1/2 top-0 bottom-0 w-px bg-white/90 -translate-x-1/2"></div>
+          <div class="absolute top-1/2 left-0 right-0 h-px bg-white/90 -translate-y-1/2"></div></div>
+      </div>
+      <label class="flex items-center gap-3 mt-4 text-sm"><span class="text-muted shrink-0">Zoom</span>
+        <input type="range" class="crop-zoom flex-1 accent-moss" min="1" max="3" step="0.01" value="${st.zoom}" />
+        <span class="crop-zoom-val w-10 text-right text-xs tabular-nums text-muted"></span></label>
+      <div class="flex justify-between mt-3 text-xs">
+        <button type="button" class="crop-center text-moss hover:underline">⊕ Centrează</button>
+        <button type="button" class="crop-open text-muted hover:text-ink">Detalii poză ↗</button>
+      </div>`,
+    onOpen: b => {
+      const vp = $('.crop-vp', b), img = $('.crop-img', b), zoomIn = $('.crop-zoom', b);
+      apply = () => {
+        const r = cropRect({ width: W, height: H, focal_x: st.fx, focal_y: st.fy, crop_zoom: st.zoom });
+        st.fx = (r.x + r.side / 2) / W; st.fy = (r.y + r.side / 2) / H;   // după limitare la margini
+        Object.assign(img.style, {
+          width: `${(W / r.side) * 100}%`, height: `${(H / r.side) * 100}%`,
+          left: `${(-r.x / r.side) * 100}%`, top: `${(-r.y / r.side) * 100}%`,
+        });
+        $('.crop-zoom-val', b).textContent = `${st.zoom.toFixed(1)}×`;
+      };
+      apply();
+      let drag = null;
+      vp.addEventListener('pointerdown', e => {
+        drag = { x: e.clientX, y: e.clientY, fx: st.fx, fy: st.fy };
+        vp.setPointerCapture(e.pointerId); vp.classList.replace('cursor-grab', 'cursor-grabbing');
+      });
+      vp.addEventListener('pointermove', e => {
+        if (!drag) return;
+        const r = cropRect({ width: W, height: H, focal_x: drag.fx, focal_y: drag.fy, crop_zoom: st.zoom });
+        const pxPerImg = vp.clientWidth / r.side;                      // pixeli ecran per pixel de poză
+        st.fx = drag.fx - (e.clientX - drag.x) / pxPerImg / W;          // tragi poza în sus → decupajul coboară
+        st.fy = drag.fy - (e.clientY - drag.y) / pxPerImg / H;
+        apply();
+      });
+      const end = () => { drag = null; vp.classList.replace('cursor-grabbing', 'cursor-grab'); };
+      vp.addEventListener('pointerup', end); vp.addEventListener('pointercancel', end);
+      zoomIn.addEventListener('input', () => { st.zoom = Number(zoomIn.value); apply(); });
+      $('.crop-center', b).addEventListener('click', () => { st.fx = 0.5; st.fy = 0.5; st.zoom = 1; zoomIn.value = 1; apply(); });
+      $('.crop-open', b).addEventListener('click', () => { $('#prompt-dialog').close(); openDetail(a.id); });
+    },
+    collect: () => ({ ...st }),
+  });
+  if (!res) return;
+  const patch = { focal_x: +res.fx.toFixed(4), focal_y: +res.fy.toFixed(4), crop_zoom: +res.zoom.toFixed(3) };
+  let { error } = await sb.from('assets').update(patch).eq('id', a.id);
+  if (error && /crop_zoom/.test(error.message || '')) {
+    delete patch.crop_zoom;
+    ({ error } = await sb.from('assets').update(patch).eq('id', a.id));
+    if (!error) toast('Zoom-ul nu s-a salvat: rulează migrarea 06 în Supabase.', 'err');
+  }
+  if (error) return toast('Nu am putut salva decupajul.', 'err');
+  Object.assign(a, patch);
+  if (product) touchProduct(product);
+  renderProducts();
+}
+
 /**
  * Versiunea pătrată a unei poze pentru Shopify (decupată în jurul punctului de focus).
  * Calea conține punctul de focus, deci o poză deja pregătită nu se reface,
  * iar una cu decupaj schimbat primește un link nou (Shopify nu ia o versiune veche din cache).
  */
 async function ensureSquare(a, handle, index) {
-  const fx = a.focal_x ?? 0.5, fy = a.focal_y ?? 0.5;
-  const dir = `shopify/${a.id}/${Math.round(fx * 100)}-${Math.round(fy * 100)}`;
+  const fx = a.focal_x ?? 0.5, fy = a.focal_y ?? 0.5, zoom = Math.max(1, a.crop_zoom || 1);
+  const dir = `shopify/${a.id}/${Math.round(fx * 100)}-${Math.round(fy * 100)}${zoom > 1.001 ? '-z' + Math.round(zoom * 100) : ''}`;
   const name = `${handle}-${index + 1}.jpg`;
   const { data: existing } = await store().list(dir, { limit: 100 });
   if (existing?.some(f => f.name === name)) return publicUrl(`${dir}/${name}`);
   const dec = await decodeUrl(publicUrl(a.master_path));
-  const size = Math.min(SQUARE_MAX, dec.width, dec.height);
-  const blob = await exportFormat(dec, { fit: 'cover', w: size, h: size }, fx, fy, false);
+  const r = cropRect(a, dec.width, dec.height);
+  const size = Math.round(Math.min(SQUARE_MAX, r.side));
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
+  ctx.drawImage(dec.source, r.x, r.y, r.side, r.side, 0, 0, size, size);
+  const blob = await new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('Export eșuat')), 'image/jpeg', 0.9));
   dec.source.close?.();
   const { error } = await store().upload(`${dir}/${name}`, blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: true });
   if (error) throw error;
