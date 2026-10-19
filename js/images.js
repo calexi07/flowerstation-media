@@ -4,7 +4,8 @@
 // =============================================================
 import { MASTER_MAX, MASTER_JPEG_QUALITY, THUMB_MAX } from './config.js';
 
-const HEIC_LIB = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+// Decodor HEIC (poze iPhone) — libheif recent, încărcat doar când e nevoie (~3 MB)
+const HEIC_LIB = 'https://cdn.jsdelivr.net/npm/heic-to@1.5.2/dist/heic-to.js';
 let heicLoading = null;
 
 function loadScript(src) {
@@ -34,10 +35,14 @@ export async function sha256(blob) {
 
 /** Transformă HEIC (poze iPhone) în JPEG, doar când e nevoie. */
 async function heicToJpeg(file) {
-  if (!heicLoading) heicLoading = loadScript(HEIC_LIB);
-  await heicLoading;
-  const out = await window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.95 });
-  return Array.isArray(out) ? out[0] : out;
+  if (!heicLoading) heicLoading = import(HEIC_LIB).catch(err => { heicLoading = null; throw err; });
+  const { heicTo } = await heicLoading;
+  try {
+    return await heicTo({ blob: file, type: 'image/jpeg', quality: 0.95 });
+  } catch (err) {
+    console.error('HEIC', err);
+    throw new Error('Fișierul HEIC nu a putut fi citit. Exportă poza ca JPG și încearcă din nou.');
+  }
 }
 
 function loadImgElement(blob) {
