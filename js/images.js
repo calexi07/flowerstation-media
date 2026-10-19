@@ -116,6 +116,104 @@ export function dominantColor(dec) {
   return `#${hex(r)}${hex(g)}${hex(b)}`;
 }
 
+// ---------------------------------------------------------------- culori flori
+/** Paleta de culori folosită pentru produse (id stocat în DB → etichetă + swatch). */
+export const COLOR_PALETTE = [
+  { id: 'rosu',       label: 'Roșu',       hex: '#C62828' },
+  { id: 'roz',        label: 'Roz',        hex: '#EC8FB0' },
+  { id: 'alb',        label: 'Alb',        hex: '#FFFFFF' },
+  { id: 'galben',     label: 'Galben',     hex: '#F5C518' },
+  { id: 'portocaliu', label: 'Portocaliu', hex: '#EE7A2B' },
+  { id: 'piersica',   label: 'Piersică',   hex: '#F6B89A' },
+  { id: 'mov',        label: 'Mov',        hex: '#8E5BB5' },
+  { id: 'albastru',   label: 'Albastru',   hex: '#4A78C2' },
+  { id: 'verde',      label: 'Verde',      hex: '#5E8C4A' },
+  { id: 'multicolor', label: 'Multicolor', hex: 'conic-gradient(#C62828,#F5C518,#5E8C4A,#4A78C2,#8E5BB5,#EC8FB0,#C62828)' },
+];
+
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return [h * 60, s, l];
+}
+
+/** Numele culorii unui pixel sau null (umbre, gri, maro/hârtie kraft). */
+function colorName(r, g, b) {
+  const [h, s, l] = rgbToHsl(r, g, b);
+  if (l < 0.13) return null;                                  // umbre
+  if (l > 0.82 && s < 0.35) return 'alb';
+  if (s < 0.2) return l > 0.72 ? 'alb' : null;                // gri / neutru
+  if (h >= 15 && h < 45 && s < 0.5 && l < 0.68) return null;   // maro, kraft, lemn
+  if (h < 12 || h >= 345) return l > 0.62 ? 'roz' : 'rosu';
+  if (h < 42) return l > 0.68 ? 'piersica' : 'portocaliu';
+  if (h < 68) return 'galben';
+  if (h < 165) return 'verde';
+  if (h < 255) return 'albastru';
+  if (h < 290) return 'mov';
+  return 'roz';
+}
+
+/**
+ * Detectează culorile florilor dintr-o imagine.
+ * - estimează fundalul din marginea pozei și îl ignoră
+ * - numără mai mult zona centrală (acolo e de obicei buchetul)
+ * - verdeața contează doar dacă domină (aranjamente verzi, plante)
+ * Rezultatul e o sugestie; se poate corecta manual.
+ */
+export function detectColors(dec) {
+  const [w, h] = fitWithin(dec.width, dec.height, 120);
+  const c = canvasOf(w, h);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(dec.source, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+
+  const q = (i) => ((d[i] >> 5) << 6) | ((d[i + 1] >> 5) << 3) | (d[i + 2] >> 5);
+  const bw = Math.max(2, Math.round(Math.min(w, h) * 0.07));
+
+  // 1. Fundal: culorile frecvente pe marginea pozei
+  const border = new Map(); let nb = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (x >= bw && x < w - bw && y >= bw && y < h - bw) continue;
+    const k = q((y * w + x) * 4); border.set(k, (border.get(k) || 0) + 1); nb++;
+  }
+  const bg = new Set([...border].filter(([, n]) => n / nb > 0.06).map(([k]) => k));
+
+  // 2. Numărăm culorile din interior, ponderat spre centru
+  const score = {}; let total = 0;
+  const cx = w / 2, cy = h / 2, rmax = Math.hypot(cx, cy);
+  for (let y = bw; y < h - bw; y++) for (let x = bw; x < w - bw; x++) {
+    const i = (y * w + x) * 4;
+    if (bg.has(q(i))) continue;
+    const name = colorName(d[i], d[i + 1], d[i + 2]);
+    if (!name) continue;
+    const wgt = 1.4 - Math.hypot(x - cx, y - cy) / rmax;
+    score[name] = (score[name] || 0) + wgt;
+    total += wgt;
+  }
+  if (!total) return [];
+
+  const green = score.verde || 0;
+  const flowerTotal = total - green;
+  if (flowerTotal / total < 0.12) return green ? ['verde'] : [];
+
+  const ranked = Object.entries(score)
+    .filter(([k]) => k !== 'verde')
+    .map(([k, v]) => [k, v / flowerTotal])
+    .sort((a, b) => b[1] - a[1]);
+  const strong = ranked.filter(([, p]) => p >= 0.12);
+  if (strong.length >= 4) return ['multicolor'];
+  return ranked.filter(([, p], i) => i === 0 || p >= 0.18).slice(0, 3).map(([k]) => k);
+}
+
 /**
  * Versiunea master (cea publică): JPG pentru fotografii, PNG pentru imagini cu transparență.
  * SVG și GIF (posibil animat) se păstrează ca atare.

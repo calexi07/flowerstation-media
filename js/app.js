@@ -7,7 +7,7 @@ import {
 } from './config.js';
 import {
   sha256, decode, decodeUrl, hasAlpha, dominantColor, makeMaster, makeThumb, exportFormat,
-  isHeic, isSvg,
+  isHeic, isSvg, detectColors, COLOR_PALETTE,
 } from './images.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -28,6 +28,12 @@ const fmtBytes = b => {
   return `${v.toFixed(v < 10 && i > 1 ? 1 : 0)} ${u[i]}`;
 };
 const fmtDate = d => new Date(d).toLocaleDateString('ro-RO', { day: 'numeric', month: 'short', year: 'numeric' });
+const cleanFlower = t => {
+  const s = String(t ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  return s ? s[0].toUpperCase() + s.slice(1) : '';
+};
+const colorById = id => COLOR_PALETTE.find(c => c.id === id);
+const swatchStyle = c => c.hex.startsWith('conic') ? `background:${c.hex}` : `background-color:${c.hex}`;
 const orientationOf = a => {
   const r = a.width / a.height;
   return r > 1.1 ? 'landscape' : r < 0.9 ? 'portrait' : 'square';
@@ -91,8 +97,10 @@ function ask({ title, body = '', ok = 'OK', danger = false, collect = () => true
 const state = {
   user: null,
   categories: [],
+  flowers: [],          // lista de flori din DB
+  productFields: false, // true după ce s-a rulat migrarea 02 (flori + culori)
   assets: [],
-  filter: { q: '', cat: null, orient: null, tags: new Set(), sort: 'new' },
+  filter: { q: '', cat: null, orient: null, tags: new Set(), flowers: new Set(), colors: new Set(), sort: 'new' },
   selectMode: false,
   selected: new Set(),
   list: [],           // rezultatul filtrat curent
@@ -105,27 +113,47 @@ const state = {
 const PAGE = 120;
 
 // ---------------------------------------------------------------- tag input
-function tagInput(container, initial = [], onChange = () => {}) {
-  let tags = [...new Set(initial.map(cleanTag).filter(Boolean))];
+/**
+ * Câmp cu chip-uri (tag-uri, flori).
+ * opts.list = id-ul datalist-ului cu sugestii; opts.clean = normalizare;
+ * opts.quick = () => listă de sugestii rapide afișate sub câmp (click = adaugă).
+ */
+function tagInput(container, initial = [], onChange = () => {}, opts = {}) {
+  const clean = opts.clean || cleanTag;
+  const same = (a, b) => norm(a) === norm(b);
+  const dedupe = arr => arr.map(clean).filter(Boolean).filter((t, i, all) => all.findIndex(x => same(x, t)) === i);
+  let tags = dedupe(initial);
+  const chipCls = opts.chipClass || 'bg-moss-soft text-moss';
   container.innerHTML = `
     <div class="flex flex-wrap gap-1.5 rounded-lg border border-line bg-paper px-2 py-1.5 focus-within:ring-2 focus-within:ring-moss/30">
       <span class="chips contents"></span>
-      <input list="tag-suggestions" placeholder="adaugă tag + Enter" class="flex-1 min-w-[110px] outline-none text-sm py-0.5 bg-transparent" />
-    </div>`;
+      <input list="${opts.list || 'tag-suggestions'}" placeholder="${opts.placeholder || 'adaugă tag + Enter'}" class="flex-1 min-w-[110px] outline-none text-sm py-0.5 bg-transparent" />
+    </div>
+    ${opts.quick ? '<div class="quick flex flex-wrap gap-1 mt-1.5"></div>' : ''}`;
   const chips = $('.chips', container);
   const input = $('input', container);
+  const quick = $('.quick', container);
   const render = () => {
     chips.innerHTML = tags.map(t => `
-      <span class="inline-flex items-center gap-1 rounded-full bg-moss-soft text-moss text-xs px-2 py-1">
-        ${esc(t)}<button type="button" data-t="${esc(t)}" class="hover:text-ink" aria-label="Șterge tag">×</button></span>`).join('');
+      <span class="inline-flex items-center gap-1 rounded-full ${chipCls} text-xs px-2 py-1">
+        ${esc(t)}<button type="button" data-t="${esc(t)}" class="hover:text-ink" aria-label="Șterge">×</button></span>`).join('');
+    if (quick) {
+      const left = opts.quick().filter(q => !tags.some(t => same(t, q))).slice(0, 14);
+      quick.innerHTML = left.map(q => `<button type="button" data-q="${esc(q)}"
+        class="text-[11px] px-2 py-0.5 rounded-full border border-line bg-paper hover:bg-cream text-muted">+ ${esc(q)}</button>`).join('');
+    }
   };
   const add = raw => {
-    const parts = raw.split(',').map(cleanTag).filter(Boolean);
+    const parts = raw.split(',').map(clean).filter(Boolean);
     let changed = false;
-    for (const p of parts) if (!tags.includes(p)) { tags.push(p); changed = true; }
+    for (const p of parts) if (!tags.some(t => same(t, p))) { tags.push(p); changed = true; }
     input.value = '';
     if (changed) { render(); onChange(tags); }
   };
+  quick?.addEventListener('click', e => {
+    const q = e.target.closest('[data-q]')?.dataset.q;
+    if (q) add(q);
+  });
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); add(input.value); }
     else if (e.key === 'Backspace' && !input.value && tags.length) { tags.pop(); render(); onChange(tags); }
@@ -139,8 +167,50 @@ function tagInput(container, initial = [], onChange = () => {}) {
   render();
   return {
     get: () => { if (input.value.trim()) add(input.value); return [...tags]; },
-    set: v => { tags = [...new Set(v.map(cleanTag).filter(Boolean))]; render(); },
+    set: v => { tags = dedupe(v); render(); },
+    refresh: render,
   };
+}
+
+// ---------------------------------------------------------------- flori & culori
+const isProduct = catId => state.categories.find(c => c.id === catId)?.slug === 'produse';
+
+/** Florile cele mai folosite primele, apoi restul listei. */
+function flowerSuggestions() {
+  const freq = new Map();
+  for (const a of state.assets) for (const f of a.flowers || []) freq.set(f, (freq.get(f) || 0) + 1);
+  const names = state.flowers.map(f => f.name);
+  return [...new Set([...[...freq].sort((a, b) => b[1] - a[1]).map(([f]) => f), ...names])];
+}
+
+const flowerInput = (container, initial, onChange) => tagInput(container, initial, onChange, {
+  list: 'flower-suggestions', clean: cleanFlower, placeholder: 'ex. Trandafiri + Enter',
+  chipClass: 'bg-blush-soft text-blush-dark', quick: flowerSuggestions,
+});
+
+/** Salvează în lista de flori numele noi folosite la o poză. */
+async function rememberFlowers(names) {
+  const known = new Set(state.flowers.map(f => norm(f.name)));
+  const fresh = names.filter(n => !known.has(norm(n)));
+  if (!fresh.length) return;
+  const { data, error } = await sb.from('flowers')
+    .upsert(fresh.map(name => ({ name })), { onConflict: 'name', ignoreDuplicates: true }).select();
+  if (!error && data) { state.flowers.push(...data); renderFlowerDatalist(); }
+}
+
+function renderFlowerDatalist() {
+  $('#flower-suggestions').innerHTML = flowerSuggestions().map(f => `<option value="${esc(f)}">`).join('');
+}
+
+function colorSwatches(selected, { size = 'w-7 h-7', counts = null } = {}) {
+  return COLOR_PALETTE.map(c => {
+    const on = selected.includes(c.id);
+    const n = counts ? counts.get(c.id) || 0 : null;
+    if (counts && !n && !on) return '';
+    return `<button type="button" data-color="${c.id}" title="${c.label}${n !== null ? ` (${n})` : ''}"
+      class="relative ${size} rounded-full border ${c.id === 'alb' ? 'border-line' : 'border-transparent'} ${on ? 'ring-2 ring-offset-2 ring-moss' : 'opacity-80 hover:opacity-100'}"
+      style="${swatchStyle(c)}" aria-pressed="${on}"><span class="sr-only">${c.label}</span></button>`;
+  }).join('');
 }
 
 // ---------------------------------------------------------------- auth
@@ -218,10 +288,23 @@ async function loadAssets() {
   state.assets = all;
 }
 
+async function loadFlowers() {
+  const { data, error } = await sb.from('flowers').select('*').order('name');
+  state.productFields = !error;
+  if (error) {
+    console.warn('Lista de flori lipsește — rulează supabase/migrare-02-flori-culori.sql', error);
+    state.flowers = [];
+    return;
+  }
+  state.flowers = data;
+}
+
 async function loadAll() {
   $('#loading').hidden = false;
   try {
-    await Promise.all([loadCategories(), loadAssets()]);
+    await Promise.all([loadCategories(), loadAssets(), loadFlowers()]);
+    renderFlowerDatalist();
+    upFlowers?.refresh();
   } catch (err) {
     console.error(err);
     toast('Nu am putut încărca datele. Verifică configurarea Supabase.', 'err');
@@ -240,8 +323,11 @@ function applyFilter() {
     if (f.cat && a.category_id !== f.cat) return false;
     if (f.orient && orientationOf(a) !== f.orient) return false;
     for (const t of f.tags) if (!a.tags.includes(t)) return false;
+    for (const fl of f.flowers) if (!(a.flowers || []).includes(fl)) return false;
+    for (const c of f.colors) if (!(a.colors || []).includes(c)) return false;
     if (terms.length) {
-      const hay = norm([a.title, a.description, a.alt_text, a.credit, a.original_name, catName(a.category_id), ...a.tags].join(' '));
+      const hay = norm([a.title, a.description, a.alt_text, a.credit, a.original_name, catName(a.category_id), ...a.tags,
+        ...(a.flowers || []), ...(a.colors || []).map(c => colorById(c)?.label)].join(' '));
       return terms.every(t => hay.includes(t));
     }
     return true;
@@ -285,7 +371,9 @@ function cardHtml(a) {
     <button class="cp overlay absolute top-2 right-2 h-7 px-2.5 rounded-full bg-white/90 text-ink text-xs font-medium hover:bg-white" title="Copiază link public">Link</button>
     <div class="overlay pointer-events-none absolute bottom-0 inset-x-0 p-3 text-white">
       <p class="text-sm font-medium leading-tight line-clamp-2">${esc(a.title)}</p>
-      <p class="text-[11px] opacity-80 mt-0.5">${esc(catName(a.category_id))} · ${a.width}×${a.height}</p>
+      <p class="text-[11px] opacity-80 mt-0.5">${esc((a.flowers || []).length ? a.flowers.join(', ') : catName(a.category_id))} · ${a.width}×${a.height}</p>
+      ${(a.colors || []).length ? `<div class="flex gap-1 mt-1.5">${a.colors.map(id => colorById(id)).filter(Boolean)
+        .map(c => `<span class="w-3.5 h-3.5 rounded-full border border-white/70" style="${swatchStyle(c)}" title="${c.label}"></span>`).join('')}</div>` : ''}
     </div>
   </div>`;
 }
@@ -328,6 +416,19 @@ function renderSidebar() {
     : '<p class="text-xs text-muted">Tag-urile apar aici după primele încărcări.</p>';
   $('#tag-suggestions').innerHTML = [...freq.keys()].sort().map(t => `<option value="${esc(t)}">`).join('');
 
+  // culori & flori (din pozele care le au)
+  const colorCounts = new Map(), flowerCounts = new Map();
+  for (const a of state.assets) {
+    for (const c of a.colors || []) colorCounts.set(c, (colorCounts.get(c) || 0) + 1);
+    for (const fl of a.flowers || []) flowerCounts.set(fl, (flowerCounts.get(fl) || 0) + 1);
+  }
+  $('#color-filter-wrap').hidden = !colorCounts.size;
+  $('#color-filter').innerHTML = colorSwatches([...state.filter.colors], { size: 'w-6 h-6', counts: colorCounts });
+  $('#flower-filter-wrap').hidden = !flowerCounts.size;
+  $('#flower-filter').innerHTML = [...flowerCounts].sort((a, b) => b[1] - a[1]).slice(0, 30).map(([fl, n]) => `
+    <button data-flower="${esc(fl)}" class="text-xs px-2.5 py-1 rounded-full ${
+      state.filter.flowers.has(fl) ? 'bg-blush-dark text-white' : 'bg-blush-soft text-blush-dark hover:bg-blush/40'}">${esc(fl)} <span class="opacity-60">${n}</span></button>`).join('');
+
   const used = state.assets.reduce((s, a) => s + (a.size_bytes || 0) + (a.original_bytes || 0) + (a.thumb_bytes || 0), 0);
   const pct = Math.min(100, (used / STORAGE_QUOTA_BYTES) * 100);
   $('#storage-label').textContent = `${fmtBytes(used)} / ${fmtBytes(STORAGE_QUOTA_BYTES)}`;
@@ -343,6 +444,8 @@ function renderToolbar() {
   if (f.q) chips.push(['q', `„${f.q}”`]);
   if (f.orient) chips.push(['orient', { landscape: 'Peisaj', portrait: 'Portret', square: 'Pătrat' }[f.orient]]);
   for (const t of f.tags) chips.push(['tag:' + t, '#' + t]);
+  for (const fl of f.flowers) chips.push(['flower:' + fl, '🌸 ' + fl]);
+  for (const c of f.colors) chips.push(['color:' + c, '● ' + (colorById(c)?.label || c)]);
   $('#active-filters').innerHTML = chips.map(([k, l]) => `
     <button data-clear="${esc(k)}" class="text-xs px-2.5 py-1 rounded-full bg-blush-soft text-blush-dark hover:bg-blush/40">${esc(l)} ×</button>`).join('');
 }
@@ -366,7 +469,17 @@ $('#active-filters').addEventListener('click', e => {
   if (k === 'q') { state.filter.q = ''; $('#search').value = ''; }
   else if (k === 'orient') state.filter.orient = null;
   else if (k.startsWith('tag:')) state.filter.tags.delete(k.slice(4));
+  else if (k.startsWith('flower:')) state.filter.flowers.delete(k.slice(7));
+  else if (k.startsWith('color:')) state.filter.colors.delete(k.slice(6));
   render();
+});
+$('#color-filter').addEventListener('click', e => {
+  const c = e.target.closest('[data-color]')?.dataset.color; if (!c) return;
+  state.filter.colors.has(c) ? state.filter.colors.delete(c) : state.filter.colors.add(c); render();
+});
+$('#flower-filter').addEventListener('click', e => {
+  const fl = e.target.closest('[data-flower]')?.dataset.flower; if (!fl) return;
+  state.filter.flowers.has(fl) ? state.filter.flowers.delete(fl) : state.filter.flowers.add(fl); render();
 });
 let searchT;
 $('#search').addEventListener('input', e => {
@@ -376,7 +489,7 @@ $('#search').addEventListener('input', e => {
 $('#sort').addEventListener('change', e => { state.filter.sort = e.target.value; render(); });
 $('#home-link').addEventListener('click', e => {
   e.preventDefault();
-  Object.assign(state.filter, { q: '', cat: null, orient: null, tags: new Set() });
+  Object.assign(state.filter, { q: '', cat: null, orient: null, tags: new Set(), flowers: new Set(), colors: new Set() });
   $('#search').value = ''; render();
 });
 
@@ -546,7 +659,14 @@ function openDetail(id) {
   el.description.value = a.description ?? '';
   el.credit.value = a.credit ?? '';
   detailTags = tagInput($('.tag-input', f), a.tags, () => { $('#detail-save').hidden = false; });
+  detailFlowers = flowerInput($('#detail-flowers'), a.flowers || [], () => { $('#detail-save').hidden = false; });
+  detailColors = [...(a.colors || [])];
+  detailColorsManual = !!a.colors_manual;
+  renderDetailColors();
+  toggleDetailProduct();
   $('#detail-save').hidden = true;
+  // produs fără culori încă (ex. încărcat înainte de actualizare) → detectăm automat
+  if (state.productFields && isProduct(a.category_id) && !detailColors.length && !a.colors_manual) autoColors(a, true);
 
   const ext = a.master_path.split('.').pop().toUpperCase();
   $('#detail-meta').textContent = `${a.width} × ${a.height} px · ${ext} · ${fmtBytes(a.size_bytes)}`;
@@ -558,6 +678,60 @@ function openDetail(id) {
   $('#detail-next').hidden = idx < 0 || idx >= state.list.length - 1;
   if (!detail.open) detail.showModal();
 }
+
+let detailFlowers, detailColors = [], detailColorsManual = false;
+
+function toggleDetailProduct() {
+  const catId = Number($('#detail-form').elements.category_id.value) || null;
+  $('#detail-product').hidden = !(state.productFields && isProduct(catId));
+}
+
+function renderDetailColors() {
+  $('#detail-colors').innerHTML = colorSwatches(detailColors);
+  const mode = $('#colors-mode');
+  if (!detailColors.length) { mode.textContent = ''; mode.className = ''; return; }
+  mode.textContent = detailColorsManual ? 'setate manual' : 'automat';
+  mode.className = `ml-1 text-[11px] px-1.5 py-0.5 rounded-full ${detailColorsManual ? 'bg-ink text-white' : 'bg-moss-soft text-moss'}`;
+}
+
+/** Detectează culorile din versiunea master; cu save=true le salvează direct. */
+async function autoColors(a, save = false) {
+  const btn = $('#colors-detect');
+  btn.textContent = 'Analizez…'; btn.disabled = true;
+  try {
+    if (!state.detailDecoded || state.detailDecoded.id !== a.id) {
+      state.detailDecoded = { id: a.id, dec: await decodeUrl(publicUrl(a.master_path)) };
+    }
+    const colors = detectColors(state.detailDecoded.dec);
+    if (state.detailId !== a.id) return;
+    detailColors = colors; detailColorsManual = false;
+    renderDetailColors();
+    if (save) {
+      const { error } = await sb.from('assets').update({ colors, colors_manual: false }).eq('id', a.id);
+      if (!error) { a.colors = colors; a.colors_manual = false; render(); }
+    } else {
+      $('#detail-save').hidden = false;
+    }
+  } catch (err) { console.error(err); toast('Nu am putut analiza culorile', 'err'); }
+  btn.textContent = '↻ Detectează automat'; btn.disabled = false;
+}
+
+$('#detail-colors').addEventListener('click', e => {
+  const id = e.target.closest('[data-color]')?.dataset.color; if (!id) return;
+  if (id === 'multicolor') detailColors = detailColors.includes('multicolor') ? [] : ['multicolor'];
+  else {
+    detailColors = detailColors.filter(c => c !== 'multicolor');
+    detailColors = detailColors.includes(id) ? detailColors.filter(c => c !== id) : [...detailColors, id];
+  }
+  detailColorsManual = true;
+  renderDetailColors();
+  $('#detail-save').hidden = false;
+});
+$('#colors-detect').addEventListener('click', () => {
+  const a = state.assets.find(x => x.id === state.detailId);
+  if (a) autoColors(a, false);
+});
+$('#detail-form').elements.category_id.addEventListener('change', toggleDetailProduct);
 
 function placeFocal(a) {
   const dot = $('#focal-dot');
@@ -636,13 +810,22 @@ $('#detail-form').addEventListener('submit', async e => {
     credit: f.credit.value.trim() || null,
     tags: detailTags.get(),
   };
+  const product = state.productFields && isProduct(patch.category_id);
+  if (product) {
+    patch.flowers = detailFlowers.get();
+    patch.colors = detailColors;
+    patch.colors_manual = detailColorsManual;
+  }
   const { error } = await sb.from('assets').update(patch).eq('id', a.id);
   if (error) return toast('Nu am putut salva.', 'err');
   Object.assign(a, patch);
+  if (product) rememberFlowers(patch.flowers);
   $('#detail-save').hidden = true;
   renderDownloads(a);
   toast('Salvat ✓');
   render();
+  // a devenit produs și nu are culori → le detectăm
+  if (product && !a.colors.length && !a.colors_manual) autoColors(a, true);
 });
 
 $$('[data-copy]').forEach(b => b.addEventListener('click', () => {
@@ -683,7 +866,11 @@ detail.addEventListener('click', e => { if (e.target === detail) detail.close();
 // ---------------------------------------------------------------- upload
 const upDlg = $('#upload-dialog');
 const upTags = tagInput($('#up-tags'));
-$('#up-category').addEventListener('change', e => { e.target.dataset.touched = '1'; });
+let upFlowers = flowerInput($('#up-flowers'), []);
+function toggleUpProduct() {
+  $('#up-product').hidden = !(state.productFields && isProduct(Number($('#up-category').value)));
+}
+$('#up-category').addEventListener('change', e => { e.target.dataset.touched = '1'; toggleUpProduct(); });
 
 const titleFromName = n => {
   const t = n.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -771,7 +958,7 @@ $('#queue-clear').addEventListener('click', () => {
 });
 $('#file-input').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
 
-function openUpload() { if (!upDlg.open) upDlg.showModal(); renderQueue(); }
+function openUpload() { if (!upDlg.open) upDlg.showModal(); toggleUpProduct(); upFlowers.refresh(); renderQueue(); }
 $('#upload-btn').addEventListener('click', openUpload);
 upDlg.addEventListener('cancel', e => { if (state.uploading) e.preventDefault(); });
 upDlg.addEventListener('close', () => {
@@ -785,7 +972,10 @@ $('#start-upload').addEventListener('click', async () => {
     category_id: cat, tags: upTags.get(),
     credit: $('#up-credit').value.trim() || null,
     keepOriginal: $('#up-original').checked,
+    product: state.productFields && isProduct(cat),
   };
+  batch.flowers = batch.product ? upFlowers.get() : [];
+  if (batch.flowers.length) rememberFlowers(batch.flowers);
   state.uploading = true;
   renderQueue();
   const todo = state.queue.filter(i => i.status === 'pending');
@@ -825,6 +1015,7 @@ async function processItem(it, batch) {
   const master = await makeMaster(file, dec, alpha);
   const thumb = await makeThumb(dec, alpha);
   const color = alpha ? null : dominantColor(dec);
+  const colors = batch.product ? detectColors(dec) : [];
   dec.source.close?.();
 
   it.status = 'uploading'; updateQueueItem(it);
@@ -857,13 +1048,15 @@ async function processItem(it, batch) {
       original_name: file.name, original_bytes: paths.original ? file.size : null,
       sha256: hash, color, uploader_email: state.user.email,
     };
+    if (batch.product) Object.assign(row, { flowers: batch.flowers, colors, colors_manual: false });
     const { data, error } = await sb.from('assets').insert(row).select().single();
     if (error) {
       if (error.code === '23505') { it.status = 'duplicate'; it.msg = 'încărcată deja de altcineva'; }
       throw new Error(error.message);
     }
     state.assets.unshift(data);
-    it.status = 'done'; it.msg = '';
+    it.status = 'done';
+    it.msg = colors.length ? 'culori: ' + colors.map(c => colorById(c)?.label).join(', ') : '';
     updateQueueItem(it);
   } catch (err) {
     if (uploaded.length) await store().remove(uploaded);
