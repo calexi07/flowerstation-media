@@ -1676,7 +1676,31 @@ function ensureReviewBar() {
 
 
 // ---------------------------------------------------------------- 🛍️ Produse Shopify (grupare + fișă + export CSV)
-const VENDOR_DEFAULT = 'The Flower Station';
+const VENDOR_DEFAULT = CFG.SHOPIFY_VENDOR ?? 'The Flower Station';
+
+// Valorile din magazinul Shopify (se pot schimba din config.js fără să atingi codul)
+const SHOPIFY_TYPES = CFG.SHOPIFY_TYPES ?? [
+  'Buchet flori', 'Aranjamente florale', 'Buchet de mireasă', 'Cadouri', 'Coroane Funerare',
+  'Decorare Cristelniță', 'Lumânare Botez', 'Lumânare Nuntă', 'Plante',
+];
+const SHOPIFY_COLLECTIONS = CFG.SHOPIFY_COLLECTIONS ?? [
+  'Buchete flori', 'Aranjamente florale', 'Buchet Mireasă', 'Cadouri', 'Plante', 'Coroane Funerare', 'Coronițe',
+  'Ziua Mamei', 'Ziua iubitei', "Valentine's Day", 'Aniversare', 'Primăvara mea', 'Back to school',
+  'Evenimente', 'Lumânare Botez', 'Lumânare Nuntă', 'Decorare Cristelniță', 'Best selling', 'Abonamente', 'Home page',
+];
+// Textul standard adăugat automat după primul paragraf al descrierii
+const SHOPIFY_DESC_FOOTER = CFG.SHOPIFY_DESC_FOOTER ?? [
+  'Buchetele noastre sunt livrate proaspete și sunt protejate de un ambalaj elegant și de calitate, conceput să le păstreze prospețimea și frumusețea pe tot parcursul transportului.',
+  'Ne dedicăm satisfacției clienților noștri, așadar nu ezita să ne contactezi la numărul afișat pentru a găsi varianta care să se potrivească cel mai bine nevoilor tale.',
+  'Produs perisabil – nu se returnează.',
+];
+// Categoria Shopify (taxonomia standard) după tipul produsului
+const SHOPIFY_CATEGORY = type => {
+  if (/plant/i.test(type || '')) return { id: 'hg-17-3', label: 'Indoor & Outdoor Plants' };
+  if (/lum[aâ]n/i.test(type || '')) return { id: 'hg-3-40-2', label: 'Candles' };
+  return { id: 'ae-3-1-3', label: 'Fresh Cut Flowers' };
+};
+const SQUARE_MAX = 2048;   // pozele produselor se exportă pătrate, max. 2048 × 2048
 const pvState = { filter: 'all', trayKind: 'all', traySel: new Set(), exportSel: new Set(), saveTimers: new Map() };
 
 async function loadProducts() {
@@ -1913,26 +1937,33 @@ function productCardHtml(p) {
     <div class="pv-strip mt-3 flex gap-2 overflow-x-auto scrollbar-thin rounded-xl border-2 border-dashed border-transparent p-1 -m-1 min-h-[96px]">
       ${imgs.map((a, i) => `
         <div draggable="true" data-aid="${a.id}" class="pv-img relative shrink-0 w-24 h-24 rounded-lg overflow-hidden bg-cream cursor-grab">
-          <img src="${publicUrl(a.thumb_path)}" alt="" class="w-full h-full object-cover pointer-events-none" />
+          <img src="${publicUrl(a.thumb_path)}" alt="" class="w-full h-full object-cover pointer-events-none" style="object-position:${Math.round((a.focal_x ?? .5) * 100)}% ${Math.round((a.focal_y ?? .5) * 100)}%" />
           ${i === 0 ? '<span class="absolute bottom-1 left-1 text-[10px] px-1.5 rounded bg-ink/80 text-white">principală</span>' : ''}
           <button type="button" class="pv-unlink absolute top-1 right-1 w-5 h-5 rounded-full bg-white/90 text-xs text-ink hover:bg-white" title="Scoate din produs">×</button>
         </div>`).join('')}
       <div class="shrink-0 w-24 h-24 rounded-lg border border-dashed border-line grid place-items-center text-[11px] text-muted text-center px-1">Trage poze aici</div>
     </div>
+    ${imgs.length ? '<p class="text-[11px] text-muted mt-1.5">Se exportă pătrate (cum le vezi aici). Dublu-click pe o poză → click pe zona importantă ca să muți decupajul.</p>' : ''}
 
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 text-sm">
       <label class="block ${p.has_variants ? 'opacity-40' : ''}"><span class="text-muted">Preț (lei)</span>
         <input data-k="price" type="number" step="0.01" min="0" inputmode="decimal" value="${fmtPrice(p.price)}" class="${field}" ${p.has_variants ? 'disabled' : ''} /></label>
       <label class="block ${p.has_variants ? 'opacity-40' : ''}"><span class="text-muted">Preț vechi</span>
         <input data-k="compare_at_price" type="number" step="0.01" min="0" inputmode="decimal" value="${fmtPrice(p.compare_at_price)}" placeholder="opțional" class="${field}" ${p.has_variants ? 'disabled' : ''} /></label>
-      <label class="block"><span class="text-muted">Colecție</span>
-        <input data-k="collection" list="pv-collections" value="${esc(p.collection || '')}" placeholder="ex. Buchete" class="${field}" /></label>
       <label class="block"><span class="text-muted">Tip produs</span>
-        <input data-k="product_type" list="pv-types" value="${esc(p.product_type || '')}" placeholder="ex. Buchet" class="${field}" /></label>
+        ${optionSelect('product_type', p.product_type, SHOPIFY_TYPES, 'Alege tipul…', field)}
+        <span class="block text-[11px] text-muted mt-1">Categorie Shopify: ${SHOPIFY_CATEGORY(p.product_type).label}</span></label>
+      <label class="block"><span class="text-muted">Colecție</span>
+        ${optionSelect('collection', p.collection, SHOPIFY_COLLECTIONS, '— fără colecție —', field)}
+        <span class="block text-[11px] text-muted mt-1">Importul permite o singură colecție</span></label>
     </div>
 
-    <label class="block mt-3 text-sm"><span class="text-muted">Descriere</span>
-      <textarea data-k="description" rows="3" class="${field}" placeholder="Ce conține buchetul, dimensiuni, ocazii…">${esc(p.description || '')}</textarea></label>
+    <label class="block mt-3 text-sm"><span class="text-muted">Descriere — primul paragraf</span>
+      <textarea data-k="description" rows="3" class="${field}" placeholder="Ex: Oferă o surpriză florală deosebită alegând acest buchet cu trandafiri, protea, mattiola…">${esc(p.description || '')}</textarea></label>
+    <details class="mt-1 text-[11px] text-muted">
+      <summary class="cursor-pointer select-none">+ ${SHOPIFY_DESC_FOOTER.length} paragrafe standard adăugate automat la export</summary>
+      <div class="mt-1 space-y-1 pl-3 border-l-2 border-line">${SHOPIFY_DESC_FOOTER.map(t => `<p>${esc(t)}</p>`).join('')}</div>
+    </details>
 
     <div class="mt-3 text-sm">
       <label class="inline-flex items-center gap-2 cursor-pointer">
@@ -1971,6 +2002,16 @@ function productCardHtml(p) {
       </div>
     </details>
   </article>`;
+}
+
+/** <select> cu valorile din magazin; păstrează și o valoare veche care nu e în listă; „Altă valoare…” la final. */
+function optionSelect(key, value, list, placeholder, cls) {
+  const opts = [...list];
+  if (value && !opts.includes(value)) opts.unshift(value);
+  return `<select data-k="${key}" class="${cls}">
+    <option value="">${esc(placeholder)}</option>
+    ${opts.map(o => `<option value="${esc(o)}" ${o === value ? 'selected' : ''}>${esc(o)}</option>`).join('')}
+    <option value="__other">+ Altă valoare…</option></select>`;
 }
 
 function mountProductCard(p) {
@@ -2021,11 +2062,24 @@ function bindProductsView() {
   list.addEventListener('input', e => {
     const p = productOf(e.target); if (!p) return;
     const k = e.target.dataset.k, vk = e.target.dataset.v;
+    if (k && e.target.value === '__other') {
+      const prev = p[k] || '';
+      e.target.value = prev;
+      ask({
+        title: k === 'collection' ? 'Altă colecție' : 'Alt tip de produs', ok: 'Folosește',
+        body: `<input class="w-full rounded-lg border border-line px-3 py-2" placeholder="Exact ca în Shopify" />
+          <p class="text-xs text-muted mt-2">Scrie numele exact ca în Shopify. ${k === 'collection' ? 'O colecție care nu există va fi creată la import.' : ''}</p>`,
+        onOpen: b => setTimeout(() => $('input', b).focus(), 50),
+        collect: b => $('input', b).value.trim(),
+      }).then(v => { if (v) { queueSave(p, { [k]: v }); renderProducts(); } });
+      return;
+    }
     if (k) {
       let val = e.target.value;
       if (k === 'price' || k === 'compare_at_price') val = val === '' ? null : Number(val);
       if (k === 'handle') val = slugify(val) || null;
-      queueSave(p, { [k]: val });
+      queueSave(p, { [k]: val || (k === 'collection' || k === 'product_type' ? null : val) });
+      if (k === 'product_type') { const hint = e.target.parentElement.querySelector('span.block'); if (hint) hint.textContent = 'Categorie Shopify: ' + SHOPIFY_CATEGORY(val).label; }
     } else if (vk) {
       const i = Number(e.target.closest('.pv-var').dataset.i);
       const variants = [...(p.variants || [])];
@@ -2115,7 +2169,7 @@ function bindProductsView() {
 }
 
 // ---------- export CSV
-const SHOPIFY_COLUMNS = ['Title', 'URL handle', 'Description', 'Vendor', 'Type', 'Tags', 'Published on online store', 'Status',
+const SHOPIFY_COLUMNS = ['Title', 'URL handle', 'Description', 'Vendor', 'Product category', 'Type', 'Tags', 'Published on online store', 'Status',
   'Option1 name', 'Option1 value', 'Price', 'Compare-at price', 'Product image URL', 'Image position', 'Image alt text',
   'SEO title', 'SEO description', 'Collection'];
 
@@ -2139,10 +2193,10 @@ function productProblems(p) {
 }
 
 /** Rândurile CSV ale unui produs: rândul 1 are fișa completă, restul doar variante / poze. */
-function productCsvRows(p, statusOverride) {
+function productCsvRows(p, statusOverride, squareUrls = {}) {
   const status = statusOverride || p.status;
   const imgs = productImages(p);
-  const tags = [...new Set([...(p.tags || []), ...productAutoTags(p)].map(t => String(t).trim()).filter(Boolean))];
+  const tags = [...new Set([...(p.tags || []), ...(p.collection ? [p.collection] : []), ...productAutoTags(p)].map(t => String(t).trim()).filter(Boolean))];
   const variants = p.has_variants
     ? (p.variants || []).filter(v => v.value?.trim())
     : [{ value: 'Default Title', price: p.price, compare_at_price: p.compare_at_price }];
@@ -2156,8 +2210,9 @@ function productCsvRows(p, statusOverride) {
     r['URL handle'] = p.handle;
     if (i === 0) Object.assign(r, {
       'Title': p.title.trim(),
-      'Description': textToHtml(p.description),
+      'Description': textToHtml(p.description) + SHOPIFY_DESC_FOOTER.map(t => `<p>${esc(t)}</p>`).join(''),
       'Vendor': p.vendor || VENDOR_DEFAULT,
+      'Product category': SHOPIFY_CATEGORY(p.product_type).id,
       'Type': p.product_type || '',
       'Tags': tags.join(', '),
       'Published on online store': status === 'active' ? 'TRUE' : 'FALSE',
@@ -2173,13 +2228,33 @@ function productCsvRows(p, statusOverride) {
       'Compare-at price': fmtPrice(v.compare_at_price),
     });
     if (img) Object.assign(r, {
-      'Product image URL': publicUrl(img.master_path),
+      'Product image URL': squareUrls[img.id] || publicUrl(img.master_path),
       'Image position': i + 1,
       'Image alt text': img.alt_text || p.title.trim(),
     });
     rows.push(r);
   }
   return rows;
+}
+
+/**
+ * Versiunea pătrată a unei poze pentru Shopify (decupată în jurul punctului de focus).
+ * Calea conține punctul de focus, deci o poză deja pregătită nu se reface,
+ * iar una cu decupaj schimbat primește un link nou (Shopify nu ia o versiune veche din cache).
+ */
+async function ensureSquare(a, handle, index) {
+  const fx = a.focal_x ?? 0.5, fy = a.focal_y ?? 0.5;
+  const dir = `shopify/${a.id}/${Math.round(fx * 100)}-${Math.round(fy * 100)}`;
+  const name = `${handle}-${index + 1}.jpg`;
+  const { data: existing } = await store().list(dir, { limit: 100 });
+  if (existing?.some(f => f.name === name)) return publicUrl(`${dir}/${name}`);
+  const dec = await decodeUrl(publicUrl(a.master_path));
+  const size = Math.min(SQUARE_MAX, dec.width, dec.height);
+  const blob = await exportFormat(dec, { fit: 'cover', w: size, h: size }, fx, fy, false);
+  dec.source.close?.();
+  const { error } = await store().upload(`${dir}/${name}`, blob, { contentType: 'image/jpeg', cacheControl: '31536000', upsert: true });
+  if (error) throw error;
+  return publicUrl(`${dir}/${name}`);
 }
 
 async function exportShopifyCsv() {
@@ -2218,7 +2293,21 @@ async function exportShopifyCsv() {
   const ready = items.filter(p => !productProblems(p).length);
   if (!ready.length) return toast('Niciun produs complet de exportat.', 'err');
 
-  const rows = ready.flatMap(p => productCsvRows(p, res.status));
+  const btn = $('#pv-export');
+  const squareUrls = {};
+  const allImgs = ready.flatMap(p => productImages(p).map((a, i) => [p, a, i]));
+  try {
+    for (let k = 0; k < allImgs.length; k++) {
+      const [p, a, i] = allImgs[k];
+      btn.textContent = `Pregătesc pozele pătrate ${k + 1}/${allImgs.length}…`;
+      squareUrls[a.id] = await ensureSquare(a, p.handle, i);
+    }
+  } catch (err) {
+    console.error(err);
+    btn.textContent = '⬇ Descarcă CSV pentru Shopify';
+    return toast('Nu am putut pregăti pozele pătrate: ' + (err.message || err), 'err');
+  }
+  const rows = ready.flatMap(p => productCsvRows(p, res.status, squareUrls));
   const csv = [SHOPIFY_COLUMNS.map(csvCell).join(','), ...rows.map(r => SHOPIFY_COLUMNS.map(c => csvCell(r[c])).join(','))].join('\r\n');
   saveBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `shopify-produse-${new Date().toISOString().slice(0, 10)}.csv`);
 
@@ -2236,7 +2325,8 @@ async function exportShopifyCsv() {
       <li>În Shopify: <b>Produse → Importă</b>.</li>
       <li>Alege fișierul descărcat.</li>
       <li>Dacă reimporți produse deja existente, bifează <b>„Suprascrie produsele cu același URL handle”</b>.</li>
-      <li><b>Încarcă și continuă</b> → verifică previzualizarea → <b>Importă produsele</b>.</li></ol>
+      <li><b>Încarcă și continuă</b> → verifică previzualizarea → <b>Importă produsele</b>.</li>
+      <li>Template <b>template-tfs</b>: selectează produsele noi în lista de produse → <b>Editare în bloc</b> → coloana <b>Template</b> → alegi template-tfs la primul și tragi în jos → <b>Salvează</b>.</li></ol>
       <p class="text-xs text-muted mt-3">Shopify descarcă singur pozele din bibliotecă (poate dura câteva minute).</p>`,
   });
 }
