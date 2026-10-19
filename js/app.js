@@ -668,6 +668,8 @@ function openDetail(id) {
   // produs fără culori încă (ex. încărcat înainte de actualizare) → detectăm automat
   if (state.productFields && isProduct(a.category_id) && !detailColors.length && !a.colors_manual) autoColors(a, true);
 
+  ensureRenameUi();
+  $('#detail-filename').textContent = a.master_path.split('/').pop();
   const ext = a.master_path.split('.').pop().toUpperCase();
   $('#detail-meta').textContent = `${a.width} × ${a.height} px · ${ext} · ${fmtBytes(a.size_bytes)}`;
   $('#detail-uploader').textContent = `Încărcată ${fmtDate(a.created_at)}${a.uploader_email ? ' de ' + a.uploader_email : ''}`;
@@ -680,6 +682,86 @@ function openDetail(id) {
 }
 
 let detailFlowers, detailColors = [], detailColorsManual = false;
+
+// ---------------------------------------------------------------- redenumire
+/** Adaugă (o singură dată) sub titlu numele fișierului + butonul „Redenumește”. */
+function ensureRenameUi() {
+  if ($('#rename-btn')) return;
+  const title = $('#detail-form').elements.title;
+  title.insertAdjacentHTML('afterend', `
+    <div class="flex items-center gap-2 text-xs text-muted -mt-1">
+      <span class="shrink-0">Fișier:</span>
+      <span id="detail-filename" class="truncate font-mono"></span>
+      <button type="button" id="rename-btn" class="ml-auto shrink-0 text-moss hover:underline">✎ Redenumește</button>
+    </div>`);
+  $('#rename-btn').addEventListener('click', () => {
+    const a = state.assets.find(x => x.id === state.detailId);
+    if (a) renameAsset(a);
+  });
+}
+
+async function renameAsset(a) {
+  const res = await ask({
+    title: 'Redenumește imaginea', ok: 'Redenumește',
+    body: `
+      <label class="block text-sm"><span class="text-muted">Nume nou</span>
+        <input name="t" class="mt-1 w-full rounded-lg border border-line px-3 py-2" value="${esc(a.title)}" /></label>
+      <p class="text-xs text-muted mt-2">Fișierul va deveni: <span class="fn font-mono text-ink"></span></p>
+      <label class="flex items-start gap-2 mt-3 text-sm cursor-pointer">
+        <input type="checkbox" name="f" class="mt-1 accent-moss" checked />
+        <span>Redenumește și fișierul (bun pentru SEO)<br>
+          <span class="text-xs text-blush-dark">Linkul public se schimbă. Dacă poza e deja folosită pe site sau în newsletter, acolo trebuie pus linkul nou.</span></span>
+      </label>`,
+    onOpen: b => {
+      const inp = $('input[name=t]', b), fn = $('.fn', b), ext = a.master_path.split('.').pop();
+      const upd = () => { fn.textContent = `${slugify(inp.value) || 'imagine'}.${ext}`; };
+      inp.addEventListener('input', upd); upd();
+      setTimeout(() => { inp.focus(); inp.select(); }, 50);
+    },
+    collect: b => ({ title: $('input[name=t]', b).value.trim(), moveFile: $('input[name=f]', b).checked }),
+  });
+  if (!res || !res.title) return;
+
+  const patch = { title: res.title };
+  const moved = [];
+  try {
+    if (res.moveFile) {
+      const slug = slugify(res.title) || 'imagine';
+      const dir = a.master_path.slice(0, a.master_path.lastIndexOf('/'));
+      const newMaster = `${dir}/${slug}.${a.master_path.split('.').pop()}`;
+      if (newMaster !== a.master_path) {
+        const { error } = await store().move(a.master_path, newMaster);
+        if (error) throw error;
+        moved.push([newMaster, a.master_path]);
+        patch.master_path = newMaster;
+      }
+      if (a.original_path) {
+        const newOrig = `${dir}/original-${slug}.${a.original_path.split('.').pop()}`;
+        if (newOrig !== a.original_path) {
+          const { error } = await store().move(a.original_path, newOrig);
+          if (error) throw error;
+          moved.push([newOrig, a.original_path]);
+          patch.original_path = newOrig;
+        }
+      }
+    }
+    const { error } = await sb.from('assets').update(patch).eq('id', a.id);
+    if (error) throw error;
+  } catch (err) {
+    console.error(err);
+    for (const [to, from] of moved.reverse()) await store().move(to, from); // anulăm mutările
+    return toast('Nu am putut redenumi imaginea.', 'err');
+  }
+
+  Object.assign(a, patch);
+  const f = $('#detail-form').elements;
+  f.title.value = a.title;
+  $('#detail-filename').textContent = a.master_path.split('/').pop();
+  if (patch.master_path) $('#detail-img').src = publicUrl(a.master_path);
+  renderDownloads(a);
+  render();
+  toast(patch.master_path ? 'Redenumită ✓ — linkul public s-a schimbat' : 'Redenumită ✓');
+}
 
 function toggleDetailProduct() {
   const catId = Number($('#detail-form').elements.category_id.value) || null;
@@ -868,9 +950,11 @@ const upDlg = $('#upload-dialog');
 const upTags = tagInput($('#up-tags'));
 let upFlowers = flowerInput($('#up-flowers'), []);
 function toggleUpProduct() {
+  const hint = $('#up-product p');
+  if (hint) hint.textContent = 'Culorile se detectează automat imediat ce adaugi pozele. Le poți schimba din „Detalii ▾” la fiecare poză.';
   $('#up-product').hidden = !(state.productFields && isProduct(Number($('#up-category').value)));
 }
-$('#up-category').addEventListener('change', e => { e.target.dataset.touched = '1'; toggleUpProduct(); });
+$('#up-category').addEventListener('change', e => { e.target.dataset.touched = '1'; toggleUpProduct(); renderQueue(); });
 
 const titleFromName = n => {
   const t = n.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -881,16 +965,45 @@ const looksImage = f => f.type.startsWith('image/') || /\.(heic|heif|jpe?g|png|w
 function addFiles(fileList) {
   const files = [...fileList].filter(looksImage);
   const skipped = fileList.length - files.length;
+  const firstNew = state.queue.length;
   for (const file of files) {
+    const tooBig = file.size > 50 * 1024 * 1024;
     state.queue.push({
       key: crypto.randomUUID(), file, title: titleFromName(file.name),
-      status: file.size > 50 * 1024 * 1024 ? 'error' : 'pending',
-      msg: file.size > 50 * 1024 * 1024 ? 'Peste 50 MB' : '',
+      description: '', alt: '', flowers: [], tags: [],
+      colors: null, colorsManual: false, analyzing: !tooBig,
+      open: false,
+      status: tooBig ? 'error' : 'pending',
+      msg: tooBig ? 'Peste 50 MB' : '',
       preview: isHeic(file) ? null : URL.createObjectURL(file),
     });
   }
+  // o singură poză → panoul de detalii deschis direct
+  if (state.queue.length === 1) state.queue[0].open = true;
   if (skipped) toast(`${skipped} fișiere ignorate (nu sunt imagini)`, 'err');
   renderQueue();
+  analyzeQueue(state.queue.slice(firstNew));
+}
+
+/** Analizează pozele imediat ce sunt adăugate: culori + previzualizare pentru HEIC. */
+async function analyzeQueue(items) {
+  for (const it of items) {
+    if (it.status !== 'pending') continue;
+    try {
+      const dec = await decode(it.file);
+      if (!it.colorsManual) it.colors = detectColors(dec);
+      if (dec.blob !== it.file) {                   // HEIC convertit → păstrăm JPG-ul, nu mai convertim la upload
+        it.converted = dec.blob;
+        it.preview = URL.createObjectURL(dec.blob);
+      }
+      dec.source.close?.();
+    } catch (err) {
+      console.error(err);
+      it.status = 'error'; it.msg = err.message || 'nu am putut citi poza';
+    }
+    it.analyzing = false;
+    if (state.queue.includes(it)) refreshQueueItem(it);
+  }
 }
 
 const STATUS = {
@@ -902,25 +1015,81 @@ const STATUS = {
   error:     ['Eroare', 'bg-blush-soft text-blush-dark'],
 };
 
-function renderQueue() {
-  const q = state.queue;
-  $('#queue').innerHTML = q.map(it => {
-    const [label, cls] = STATUS[it.status];
-    const editable = it.status === 'pending' && !state.uploading;
-    return `
-    <li class="flex items-center gap-3 rounded-xl border border-line p-2 pr-3" data-key="${it.key}">
+const upIsProduct = () => state.productFields && isProduct(Number($('#up-category').value));
+
+function queueItemHtml(it) {
+  const [label, cls] = STATUS[it.status];
+  const editable = it.status === 'pending' && !state.uploading;
+  const product = upIsProduct();
+  const dots = product && it.colors?.length
+    ? `<span class="flex gap-0.5">${it.colors.map(id => colorById(id)).filter(Boolean)
+        .map(c => `<span class="w-3 h-3 rounded-full border border-line" style="${swatchStyle(c)}" title="${c.label}"></span>`).join('')}</span>` : '';
+  const field = 'mt-1 w-full rounded-lg border border-line bg-paper px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-moss/30';
+  return `
+  <li class="rounded-xl border ${it.open ? 'border-moss/40 bg-cream/40' : 'border-line'}" data-key="${it.key}">
+    <div class="flex items-center gap-3 p-2 pr-3">
       <div class="w-14 h-14 rounded-lg bg-cream overflow-hidden shrink-0 grid place-items-center text-xs text-muted">
-        ${it.preview ? `<img src="${it.preview}" class="w-full h-full object-cover" alt="" />` : 'HEIC'}
+        ${it.preview ? `<img src="${it.preview}" class="w-full h-full object-cover" alt="" />` : (it.analyzing ? '<span class="spin inline-block">◌</span>' : 'HEIC')}
       </div>
       <div class="flex-1 min-w-0">
-        <input class="q-title w-full text-sm font-medium bg-transparent outline-none border-b border-transparent focus:border-moss disabled:opacity-80"
-          value="${esc(it.title)}" ${editable ? '' : 'disabled'} />
-        <p class="text-xs text-muted truncate">${esc(it.file.name)} · ${fmtBytes(it.file.size)}${it.msg ? ' · ' + esc(it.msg) : ''}</p>
+        <input class="q-title w-full text-sm font-medium bg-transparent outline-none border-b border-dashed border-line hover:border-muted focus:border-moss disabled:border-transparent disabled:opacity-80"
+          value="${esc(it.title)}" placeholder="Titlu" ${editable ? '' : 'disabled'} />
+        <p class="q-meta text-xs text-muted truncate mt-0.5">${esc(it.file.name)} · ${fmtBytes(it.file.size)}${it.msg ? ' · ' + esc(it.msg) : ''}</p>
       </div>
-      <span class="text-xs px-2 py-1 rounded-full whitespace-nowrap ${cls}">${it.status === 'working' || it.status === 'uploading' ? '<span class="inline-block spin">◌</span> ' : ''}${label}</span>
-      ${editable || ['error', 'duplicate', 'done'].includes(it.status) ? `<button class="q-remove w-7 h-7 rounded-full hover:bg-cream text-muted" aria-label="Scoate">✕</button>` : ''}
-    </li>`;
-  }).join('');
+      ${it.analyzing && product ? '<span class="text-[11px] text-muted whitespace-nowrap">analizez culorile…</span>' : dots}
+      ${editable ? `<button type="button" class="q-toggle text-xs px-2.5 py-1 rounded-full border border-line bg-paper hover:bg-cream whitespace-nowrap">${it.open ? 'Ascunde ▴' : 'Detalii ▾'}</button>` : ''}
+      <span class="q-pill text-xs px-2 py-1 rounded-full whitespace-nowrap ${cls}">${it.status === 'working' || it.status === 'uploading' ? '<span class="inline-block spin">◌</span> ' : ''}${label}</span>
+      ${editable || ['error', 'duplicate', 'done'].includes(it.status) ? `<button type="button" class="q-remove w-7 h-7 rounded-full hover:bg-cream text-muted" aria-label="Scoate">✕</button>` : ''}
+    </div>
+    ${it.open && editable ? `
+    <div class="grid sm:grid-cols-2 gap-3 px-3 pb-3 text-sm">
+      <label class="block sm:col-span-2"><span class="text-muted">Descriere / note</span>
+        <textarea data-f="description" rows="2" class="${field}" placeholder="Ex: buchet pentru Ziua Mamei, ambalaj kraft">${esc(it.description)}</textarea></label>
+      <label class="block sm:col-span-2"><span class="text-muted">Text alternativ (SEO)</span>
+        <input data-f="alt" class="${field}" value="${esc(it.alt)}" placeholder="Implicit: titlul pozei" /></label>
+      ${product ? `
+      <div><span class="text-muted">Flori în această poză</span>
+        <div class="q-flowers mt-1"></div>
+        <p class="text-[11px] text-muted mt-1">Se adaugă la florile alese pentru tot lotul.</p></div>
+      <div><div class="flex items-center justify-between"><span class="text-muted">Culori
+          ${it.colors?.length ? `<span class="ml-1 text-[11px] px-1.5 py-0.5 rounded-full ${it.colorsManual ? 'bg-ink text-white' : 'bg-moss-soft text-moss'}">${it.colorsManual ? 'manual' : 'automat'}</span>` : ''}</span>
+          ${it.colorsManual ? '<button type="button" class="q-redetect text-xs text-moss hover:underline">↻ automat</button>' : ''}</div>
+        <div class="q-colors mt-1.5 flex flex-wrap gap-1.5">${it.analyzing ? '<span class="text-xs text-muted">Analizez…</span>' : colorSwatches(it.colors || [], { size: 'w-6 h-6' })}</div></div>` : ''}
+      <div class="sm:col-span-2"><span class="text-muted">Tag-uri în plus pentru această poză</span>
+        <div class="q-tags mt-1"></div></div>
+    </div>` : ''}
+  </li>`;
+}
+
+/** Leagă câmpurile cu chip-uri (flori, tag-uri) din panoul unei poze. */
+function mountQueueItem(li, it) {
+  const fl = $('.q-flowers', li), tg = $('.q-tags', li);
+  if (fl) flowerInput(fl, it.flowers, v => { it.flowers = [...v]; });
+  if (tg) tagInput(tg, it.tags, v => { it.tags = [...v]; });
+}
+
+function refreshQueueItem(it) {
+  const li = $(`#queue li[data-key="${it.key}"]`);
+  if (!li) return;
+  const ae = document.activeElement;
+  const focused = li.contains(ae) && /INPUT|TEXTAREA/.test(ae.tagName);
+  if (focused && it.open) {                        // nu stricăm ce scrie utilizatorul; actualizăm doar culorile
+    const box = $('.q-colors', li);
+    if (box) box.innerHTML = colorSwatches(it.colors || [], { size: 'w-6 h-6' });
+    return;
+  }
+  li.outerHTML = queueItemHtml(it);
+  const fresh = $(`#queue li[data-key="${it.key}"]`);
+  if (fresh) mountQueueItem(fresh, it);
+}
+
+function renderQueue() {
+  const q = state.queue;
+  $('#queue').innerHTML = q.map(queueItemHtml).join('');
+  for (const it of q) {
+    const li = $(`#queue li[data-key="${it.key}"]`);
+    if (li) mountQueueItem(li, it);
+  }
   const pending = q.filter(i => i.status === 'pending').length;
   const done = q.filter(i => i.status === 'done').length;
   $('#queue-summary').textContent = q.length ? `${q.length} fișiere · ${done} încărcate · ${pending} în așteptare` : '';
@@ -932,24 +1101,40 @@ function updateQueueItem(it) {
   const li = $(`#queue li[data-key="${it.key}"]`);
   if (!li) return renderQueue();
   const [label, cls] = STATUS[it.status];
-  const pill = li.querySelector('span.rounded-full');
-  pill.className = `text-xs px-2 py-1 rounded-full whitespace-nowrap ${cls}`;
+  const pill = $('.q-pill', li);
+  pill.className = `q-pill text-xs px-2 py-1 rounded-full whitespace-nowrap ${cls}`;
   pill.innerHTML = `${it.status === 'working' || it.status === 'uploading' ? '<span class="inline-block spin">◌</span> ' : ''}${label}`;
-  if (it.msg) li.querySelector('p').textContent = `${it.file.name} · ${fmtBytes(it.file.size)} · ${it.msg}`;
+  if (it.msg) $('.q-meta', li).textContent = `${it.file.name} · ${fmtBytes(it.file.size)} · ${it.msg}`;
 }
 
+const queueItemOf = el => state.queue.find(i => i.key === el.closest('li[data-key]')?.dataset.key);
+
 $('#queue').addEventListener('input', e => {
-  if (!e.target.classList.contains('q-title')) return;
-  const it = state.queue.find(i => i.key === e.target.closest('li').dataset.key);
-  if (it) it.title = e.target.value;
+  const it = queueItemOf(e.target); if (!it) return;
+  if (e.target.classList.contains('q-title')) it.title = e.target.value;
+  else if (e.target.dataset.f) it[e.target.dataset.f] = e.target.value;
 });
 $('#queue').addEventListener('click', e => {
-  if (!e.target.closest('.q-remove')) return;
-  const key = e.target.closest('li').dataset.key;
-  const it = state.queue.find(i => i.key === key);
-  if (it?.preview) URL.revokeObjectURL(it.preview);
-  state.queue = state.queue.filter(i => i.key !== key);
-  renderQueue();
+  const it = queueItemOf(e.target); if (!it) return;
+  if (e.target.closest('.q-remove')) {
+    if (it.preview) URL.revokeObjectURL(it.preview);
+    state.queue = state.queue.filter(i => i !== it);
+    return renderQueue();
+  }
+  if (e.target.closest('.q-toggle')) { it.open = !it.open; return refreshQueueItem(it); }
+  if (e.target.closest('.q-redetect')) {
+    it.colorsManual = false; it.analyzing = true; refreshQueueItem(it);
+    return analyzeQueue([it]);
+  }
+  const sw = e.target.closest('.q-colors [data-color]');
+  if (sw) {
+    const id = sw.dataset.color;
+    let c = it.colors || [];
+    if (id === 'multicolor') c = c.includes('multicolor') ? [] : ['multicolor'];
+    else { c = c.filter(x => x !== 'multicolor'); c = c.includes(id) ? c.filter(x => x !== id) : [...c, id]; }
+    it.colors = c; it.colorsManual = true;
+    refreshQueueItem(it);
+  }
 });
 $('#queue-clear').addEventListener('click', () => {
   if (state.uploading) return;
@@ -1009,13 +1194,13 @@ async function processItem(it, batch) {
   const dupe = state.assets.find(a => a.sha256 === hash);
   if (dupe) { it.status = 'duplicate'; it.msg = `„${dupe.title}”`; return updateQueueItem(it); }
 
-  const dec = await decode(file);
+  const dec = await decode(it.converted ? new File([it.converted], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }) : file);
   const mayAlpha = isSvg(file) || /png|webp|gif|avif/i.test(file.type || file.name);
   const alpha = mayAlpha ? hasAlpha(dec) : false;
   const master = await makeMaster(file, dec, alpha);
   const thumb = await makeThumb(dec, alpha);
   const color = alpha ? null : dominantColor(dec);
-  const colors = batch.product ? detectColors(dec) : [];
+  const colors = !batch.product ? [] : (it.colorsManual || it.colors) ? (it.colors || []) : detectColors(dec);
   dec.source.close?.();
 
   it.status = 'uploading'; updateQueueItem(it);
@@ -1041,14 +1226,21 @@ async function processItem(it, batch) {
 
     const row = {
       id, title: it.title.trim() || titleFromName(file.name),
-      category_id: batch.category_id, tags: batch.tags, credit: batch.credit,
+      category_id: batch.category_id, credit: batch.credit,
+      tags: [...new Set([...batch.tags, ...it.tags])],
+      description: it.description.trim() || null, alt_text: it.alt.trim() || null,
       master_path: paths.master, thumb_path: paths.thumb, original_path: paths.original,
       mime: master.mime, width: master.width, height: master.height,
       size_bytes: master.blob.size, thumb_bytes: thumb.blob.size,
       original_name: file.name, original_bytes: paths.original ? file.size : null,
       sha256: hash, color, uploader_email: state.user.email,
     };
-    if (batch.product) Object.assign(row, { flowers: batch.flowers, colors, colors_manual: false });
+    if (batch.product) {
+      const flowers = [...batch.flowers];
+      for (const f of it.flowers) if (!flowers.some(x => norm(x) === norm(f))) flowers.push(f);
+      Object.assign(row, { flowers, colors, colors_manual: !!it.colorsManual });
+      if (it.flowers.length) rememberFlowers(it.flowers);
+    }
     const { data, error } = await sb.from('assets').insert(row).select().single();
     if (error) {
       if (error.code === '23505') { it.status = 'duplicate'; it.msg = 'încărcată deja de altcineva'; }
