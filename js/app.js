@@ -9,6 +9,11 @@ import {
   sha256, decode, decodeUrl, hasAlpha, dominantColor, makeMaster, makeThumb, exportFormat,
   isHeic, isSvg, detectColors, COLOR_PALETTE,
 } from './images.js';
+import { isVideo, prepareVideo, videoFrame, probeVideo, fmtDuration } from './video.js';
+import * as CFG from './config.js';
+
+// Limita pe fișier a planului Supabase (Free: 50 MB). Pe Pro pune MAX_FILE_MB în config.js.
+const MAX_FILE_BYTES = (CFG.MAX_FILE_MB ?? 50) * 1024 * 1024;
 
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const store = () => sb.storage.from(BUCKET);
@@ -100,7 +105,7 @@ const state = {
   flowers: [],          // lista de flori din DB
   productFields: false, // true după ce s-a rulat migrarea 02 (flori + culori)
   assets: [],
-  filter: { q: '', cat: null, orient: null, tags: new Set(), flowers: new Set(), colors: new Set(), sort: 'new' },
+  filter: { q: '', cat: null, orient: null, kind: null, tags: new Set(), flowers: new Set(), colors: new Set(), sort: 'new' },
   view: 'library',     // 'library' sau 'review' (De revizuit)
   selectMode: false,
   selected: new Set(),
@@ -331,6 +336,7 @@ function applyFilter() {
     if (review !== inReview(a)) return false;
     if (!review && f.cat && a.category_id !== f.cat) return false;
     if (f.orient && orientationOf(a) !== f.orient) return false;
+    if (f.kind && (a.kind || 'image') !== f.kind) return false;
     for (const t of f.tags) if (!a.tags.includes(t)) return false;
     for (const fl of f.flowers) if (!(a.flowers || []).includes(fl)) return false;
     for (const c of f.colors) if (!(a.colors || []).includes(c)) return false;
@@ -376,7 +382,9 @@ function cardHtml(a) {
   return `
   <div class="card relative rounded-[14px] overflow-hidden bg-paper shadow-card ${sel ? 'selected' : ''}" data-id="${a.id}">
     <button class="open block w-full ${transparent ? 'checker' : ''}" style="aspect-ratio:${a.width}/${a.height};background-color:${transparent ? '' : esc(a.color || '#efe9e1')}" aria-label="${esc(a.title)}">
-      ${a.processed === false && /heic/.test(a.mime)
+      ${a.kind === 'video' && (!a.thumb_path || a.thumb_path === a.master_path)
+        ? `<span class="w-full h-full min-h-[160px] grid place-items-center text-muted bg-cream"><span class="text-center"><span class="text-3xl block">▶</span><span class="text-xs">${a.processed === false ? 'Pregătesc coperta…' : 'Video'}</span></span></span>`
+        : a.processed === false && /heic/.test(a.mime)
         ? '<span class="w-full h-full min-h-[160px] grid place-items-center text-xs text-muted"><span><span class="spin inline-block">◌</span> Pregătesc…</span></span>'
         : `<img src="${publicUrl(a.thumb_path)}" alt="${esc(a.alt_text || a.title)}" loading="lazy" decoding="async" class="w-full h-full object-cover" />`}
     </button>
@@ -386,6 +394,7 @@ function cardHtml(a) {
       <button class="rv-drop rounded-full bg-white/90 hover:bg-white text-blush-dark text-xs font-medium px-3 py-1.5">✕ Șterge</button>
     </div>` : ''}
     <div class="overlay pointer-events-none absolute inset-0 bg-gradient-to-t from-ink/70 via-transparent to-ink/10"></div>
+    ${a.kind === 'video' && a.duration ? `<span class="pointer-events-none absolute ${inReview(a) ? 'top-2 right-2' : 'top-11 right-2'} text-[11px] font-medium px-2 py-0.5 rounded-full bg-ink/75 text-white">▶ ${fmtDuration(a.duration)}</span>` : ''}
     <button class="sel overlay absolute top-2 left-2 w-7 h-7 rounded-full grid place-items-center text-xs border-2 ${sel ? 'bg-moss border-moss text-white' : 'bg-white/80 border-white text-transparent hover:text-moss'}" aria-label="Selectează">✓</button>
     <button class="cp overlay absolute top-2 right-2 h-7 px-2.5 rounded-full bg-white/90 text-ink text-xs font-medium hover:bg-white" title="Copiază link public">Link</button>
     <div class="overlay pointer-events-none absolute bottom-0 inset-x-0 p-3 text-white ${inReview(a) ? 'hidden' : ''}">
@@ -431,7 +440,10 @@ function renderSidebar() {
   const orients = [[null, 'Toate'], ['landscape', 'Peisaj'], ['portrait', 'Portret'], ['square', 'Pătrat']];
   $('#orient-list').innerHTML = orients.map(([v, l]) => `
     <button data-orient="${v ?? ''}" class="text-xs px-2.5 py-1 rounded-full border ${
-      state.filter.orient === v ? 'bg-ink text-white border-ink' : 'border-line bg-paper hover:bg-cream'}">${l}</button>`).join('');
+      state.filter.orient === v ? 'bg-ink text-white border-ink' : 'border-line bg-paper hover:bg-cream'}">${l}</button>`).join('') +
+    (lib.some(a => a.kind === 'video') ? '<span class="basis-full h-0"></span>' + [[null, 'Poze + video'], ['image', 'Poze'], ['video', '▶ Video']].map(([v, l]) => `
+    <button data-kind="${v ?? ''}" class="text-xs px-2.5 py-1 rounded-full border ${
+      state.filter.kind === v ? 'bg-ink text-white border-ink' : 'border-line bg-paper hover:bg-cream'}">${l}</button>`).join('') : '');
 
   const freq = new Map();
   for (const a of lib) for (const t of a.tags) freq.set(t, (freq.get(t) || 0) + 1);
@@ -468,6 +480,7 @@ function renderToolbar() {
   $('#result-count').textContent = `${state.list.length} ${state.list.length === 1 ? 'imagine' : 'imagini'}`;
   const chips = [];
   if (f.q) chips.push(['q', `„${f.q}”`]);
+  if (f.kind) chips.push(['kind', f.kind === 'video' ? '▶ Video' : 'Poze']);
   if (f.orient) chips.push(['orient', { landscape: 'Peisaj', portrait: 'Portret', square: 'Pătrat' }[f.orient]]);
   for (const t of f.tags) chips.push(['tag:' + t, '#' + t]);
   for (const fl of f.flowers) chips.push(['flower:' + fl, '🌸 ' + fl]);
@@ -487,6 +500,8 @@ $('#cat-list').addEventListener('click', e => {
   closeSidebar(); render();
 });
 $('#orient-list').addEventListener('click', e => {
+  const k = e.target.closest('[data-kind]');
+  if (k) { state.filter.kind = k.dataset.kind || null; return render(); }
   const b = e.target.closest('[data-orient]'); if (!b) return;
   state.filter.orient = b.dataset.orient || null; render();
 });
@@ -498,6 +513,7 @@ $('#active-filters').addEventListener('click', e => {
   const k = e.target.closest('[data-clear]')?.dataset.clear; if (!k) return;
   if (k === 'q') { state.filter.q = ''; $('#search').value = ''; }
   else if (k === 'orient') state.filter.orient = null;
+  else if (k === 'kind') state.filter.kind = null;
   else if (k.startsWith('tag:')) state.filter.tags.delete(k.slice(4));
   else if (k.startsWith('flower:')) state.filter.flowers.delete(k.slice(7));
   else if (k.startsWith('color:')) state.filter.colors.delete(k.slice(6));
@@ -519,7 +535,7 @@ $('#search').addEventListener('input', e => {
 $('#sort').addEventListener('change', e => { state.filter.sort = e.target.value; render(); });
 $('#home-link').addEventListener('click', e => {
   e.preventDefault();
-  Object.assign(state.filter, { q: '', cat: null, orient: null, tags: new Set(), flowers: new Set(), colors: new Set() });
+  Object.assign(state.filter, { q: '', cat: null, orient: null, kind: null, tags: new Set(), flowers: new Set(), colors: new Set() });
   $('#search').value = ''; render();
 });
 
@@ -662,7 +678,7 @@ $('#bulk-bar').addEventListener('click', async e => {
 });
 
 async function deleteAssets(items) {
-  const paths = [...new Set(items.flatMap(a => [a.master_path, a.thumb_path, a.original_path]).filter(Boolean))];
+  const paths = [...new Set(items.flatMap(a => [a.master_path, a.thumb_path, a.original_path, a.poster_path]).filter(Boolean))];
   const { error: e1 } = await sb.from('assets').delete().in('id', items.map(a => a.id));
   if (e1) { toast('Nu am putut șterge.', 'err'); return false; }
   const { error: e2 } = await store().remove(paths);
@@ -685,11 +701,28 @@ function openDetail(id) {
   history.replaceState(null, '', `#a=${id}`);
 
   const img = $('#detail-img');
-  img.src = publicUrl(a.master_path);
-  img.alt = a.alt_text || a.title;
-  img.classList.toggle('checker', /png|svg|gif/.test(a.mime));
+  const isVid = a.kind === 'video';
+  let player = $('#detail-video');
+  if (!player) {
+    img.insertAdjacentHTML('afterend', '<video id="detail-video" controls playsinline preload="metadata" class="block max-w-full max-h-[50vh] lg:max-h-[86vh] bg-ink" hidden></video>');
+    player = $('#detail-video');
+  }
+  player.pause();
+  player.hidden = !isVid;
+  img.hidden = isVid;
   $('#focal-dot').hidden = true;
-  img.onload = () => placeFocal(a);
+  $('#detail-frame').nextElementSibling.hidden = isVid;   // indicația cu punctul de focus
+  if (isVid) {
+    player.poster = a.poster_path ? publicUrl(a.poster_path) : '';
+    player.src = publicUrl(a.master_path);
+    img.removeAttribute('src');
+  } else {
+    player.removeAttribute('src'); player.load();
+    img.src = publicUrl(a.master_path);
+    img.alt = a.alt_text || a.title;
+    img.classList.toggle('checker', /png|svg|gif/.test(a.mime));
+    img.onload = () => placeFocal(a);
+  }
 
   const f = $('#detail-form');
   const el = f.elements;
@@ -706,7 +739,7 @@ function openDetail(id) {
   toggleDetailProduct();
   $('#detail-save').hidden = true;
   // produs fără culori încă (ex. încărcat înainte de actualizare) → detectăm automat
-  if (state.productFields && isProduct(a.category_id) && !detailColors.length && !a.colors_manual) autoColors(a, true);
+  if (state.productFields && isProduct(a.category_id) && !detailColors.length && !a.colors_manual && (a.kind !== 'video' || a.poster_path)) autoColors(a, true);
 
   ensureRenameUi();
   ensureReviewBar();
@@ -824,7 +857,7 @@ async function autoColors(a, save = false) {
   btn.textContent = 'Analizez…'; btn.disabled = true;
   try {
     if (!state.detailDecoded || state.detailDecoded.id !== a.id) {
-      state.detailDecoded = { id: a.id, dec: await decodeUrl(publicUrl(a.master_path)) };
+      state.detailDecoded = { id: a.id, dec: await decodeUrl(publicUrl(a.kind === 'video' ? a.poster_path : a.master_path)) };
     }
     const colors = detectColors(state.detailDecoded.dec);
     if (state.detailId !== a.id) return;
@@ -869,9 +902,14 @@ function renderDownloads(a) {
   const rows = [];
   if (a.original_path) rows.push(`<button data-dl="original" class="dl-row">
     <span>Original</span><span class="text-muted text-xs">${fmtBytes(a.original_bytes)}</span></button>`);
-  rows.push(`<button data-dl="master" class="dl-row">
+  if (a.kind === 'video') {
+    rows.push(`<button data-dl="master" class="dl-row">
+      <span>Video ${esc(a.master_path.split('.').pop().toUpperCase())}</span><span class="text-muted text-xs">${a.width}×${a.height} · ${fmtDuration(a.duration)} · ${fmtBytes(a.size_bytes)}</span></button>`);
+    if (a.poster_path) rows.push(`<button data-dl="poster" class="dl-row">
+      <span>Copertă (JPG)</span><span class="text-muted text-xs">cadru din video</span></button>`);
+  } else rows.push(`<button data-dl="master" class="dl-row">
     <span>Rezoluție maximă</span><span class="text-muted text-xs">${a.width}×${a.height}</span></button>`);
-  if (a.mime !== 'image/svg+xml' && a.mime !== 'image/gif') {
+  if (a.kind !== 'video' && a.mime !== 'image/svg+xml' && a.mime !== 'image/gif') {
     for (const f of EXPORT_FORMATS) rows.push(`<button data-dl="${f.id}" class="dl-row">
       <span>${esc(f.label)}</span><span class="text-muted text-xs">${esc(f.hint)}</span></button>`);
   }
@@ -894,6 +932,7 @@ $('#download-list').addEventListener('click', async e => {
   try {
     if (kind === 'original') await downloadUrl(publicUrl(a.original_path), a.original_path.split('/').pop());
     else if (kind === 'master') await downloadUrl(publicUrl(a.master_path), a.master_path.split('/').pop());
+    else if (kind === 'poster') await downloadUrl(publicUrl(a.poster_path), `${base}-coperta.jpg`);
     else {
       const fmt = EXPORT_FORMATS.find(f => f.id === kind);
       if (!state.detailDecoded || state.detailDecoded.id !== a.id) {
@@ -958,7 +997,9 @@ $$('[data-copy]').forEach(b => b.addEventListener('click', () => {
   const alt = a.alt_text || a.title;
   const text = {
     url,
-    html: `<img src="${url}" alt="${esc(alt)}" width="${a.width}" height="${a.height}" loading="lazy" />`,
+    html: a.kind === 'video'
+      ? `<video src="${url}"${a.poster_path ? ` poster="${publicUrl(a.poster_path)}"` : ''} width="${a.width}" height="${a.height}" controls playsinline preload="metadata"></video>`
+      : `<img src="${url}" alt="${esc(alt)}" width="${a.width}" height="${a.height}" loading="lazy" />`,
     md: `![${alt.replace(/[[\]]/g, '')}](${url})`,
   }[b.dataset.copy];
   copyText(text, b.dataset.copy === 'url' ? 'Link copiat' : `${b.textContent} copiat`);
@@ -982,6 +1023,7 @@ function stepDetail(d) {
 $('#detail-prev').addEventListener('click', () => stepDetail(-1));
 $('#detail-next').addEventListener('click', () => stepDetail(1));
 detail.addEventListener('close', () => {
+  $('#detail-video')?.pause();
   state.detailId = null; state.detailDecoded = null;
   history.replaceState(null, '', location.pathname + location.search);
 });
@@ -1002,22 +1044,23 @@ const titleFromName = n => {
   const t = n.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return t ? t[0].toUpperCase() + t.slice(1) : 'Imagine';
 };
-const looksImage = f => f.type.startsWith('image/') || /\.(heic|heif|jpe?g|png|webp|gif|svg|avif)$/i.test(f.name);
+const looksImage = f => f.type.startsWith('image/') || isVideo(f) || /\.(heic|heif|jpe?g|png|webp|gif|svg|avif)$/i.test(f.name);
 
 function addFiles(fileList) {
   const files = [...fileList].filter(looksImage);
   const skipped = fileList.length - files.length;
   const firstNew = state.queue.length;
   for (const file of files) {
-    const tooBig = file.size > 50 * 1024 * 1024;
+    const tooBig = isVideo(file) ? file.size > 4 * 1024 ** 3 : file.size > MAX_FILE_BYTES;
     state.queue.push({
       key: crypto.randomUUID(), file, title: titleFromName(file.name),
       description: '', alt: '', flowers: [], tags: [],
       colors: null, colorsManual: false, analyzing: !tooBig,
       open: false,
       status: tooBig ? 'error' : 'pending',
-      msg: tooBig ? 'Peste 50 MB' : '',
-      preview: isHeic(file) ? null : URL.createObjectURL(file),
+      msg: tooBig ? (isVideo(file) ? 'Peste 4 GB' : `Peste ${Math.round(MAX_FILE_BYTES / 1048576)} MB`) : '',
+      video: isVideo(file), duration: null,
+      preview: isHeic(file) || isVideo(file) ? null : URL.createObjectURL(file),
     });
   }
   // o singură poză → panoul de detalii deschis direct
@@ -1032,6 +1075,21 @@ async function analyzeQueue(items) {
   for (const it of items) {
     if (it.status !== 'pending') continue;
     try {
+      if (it.video) {
+        try {
+          const fr = await videoFrame(it.file);
+          it.duration = fr.duration;
+          if (!it.colorsManual) it.colors = detectColors(fr);
+          const pv = await makeThumb(fr, false);
+          it.preview = URL.createObjectURL(pv.blob);
+        } catch {
+          it.msg = 'previzualizare indisponibilă în acest browser';
+          try { it.duration = (await probeVideo(it.file)).duration; } catch {}
+        }
+        it.analyzing = false;
+        if (state.queue.includes(it)) refreshQueueItem(it);
+        continue;
+      }
       const dec = await decode(it.file);
       if (!it.colorsManual) it.colors = detectColors(dec);
       if (dec.blob !== it.file) {                   // HEIC convertit → păstrăm JPG-ul, nu mai convertim la upload
@@ -1071,12 +1129,12 @@ function queueItemHtml(it) {
   <li class="rounded-xl border ${it.open ? 'border-moss/40 bg-cream/40' : 'border-line'}" data-key="${it.key}">
     <div class="flex items-center gap-3 p-2 pr-3">
       <div class="w-14 h-14 rounded-lg bg-cream overflow-hidden shrink-0 grid place-items-center text-xs text-muted">
-        ${it.preview ? `<img src="${it.preview}" class="w-full h-full object-cover" alt="" />` : (it.analyzing ? '<span class="spin inline-block">◌</span>' : 'HEIC')}
+        ${it.preview ? `<img src="${it.preview}" class="w-full h-full object-cover" alt="" />` : (it.analyzing ? '<span class="spin inline-block">◌</span>' : it.video ? '▶' : 'HEIC')}
       </div>
       <div class="flex-1 min-w-0">
         <input class="q-title w-full text-sm font-medium bg-transparent outline-none border-b border-dashed border-line hover:border-muted focus:border-moss disabled:border-transparent disabled:opacity-80"
           value="${esc(it.title)}" placeholder="Titlu" ${editable ? '' : 'disabled'} />
-        <p class="q-meta text-xs text-muted truncate mt-0.5">${esc(it.file.name)} · ${fmtBytes(it.file.size)}${it.msg ? ' · ' + esc(it.msg) : ''}</p>
+        <p class="q-meta text-xs text-muted truncate mt-0.5">${it.video ? '🎬 ' : ''}${esc(it.file.name)} · ${fmtBytes(it.file.size)}${it.duration ? ' · ' + fmtDuration(it.duration) : ''}${it.msg ? ' · ' + esc(it.msg) : ''}</p>
       </div>
       ${it.analyzing && product ? '<span class="text-[11px] text-muted whitespace-nowrap">analizez culorile…</span>' : dots}
       ${editable ? `<button type="button" class="q-toggle text-xs px-2.5 py-1 rounded-full border border-line bg-paper hover:bg-cream whitespace-nowrap">${it.open ? 'Ascunde ▴' : 'Detalii ▾'}</button>` : ''}
@@ -1146,7 +1204,7 @@ function updateQueueItem(it) {
   const pill = $('.q-pill', li);
   pill.className = `q-pill text-xs px-2 py-1 rounded-full whitespace-nowrap ${cls}`;
   pill.innerHTML = `${it.status === 'working' || it.status === 'uploading' ? '<span class="inline-block spin">◌</span> ' : ''}${label}`;
-  if (it.msg) $('.q-meta', li).textContent = `${it.file.name} · ${fmtBytes(it.file.size)} · ${it.msg}`;
+  if (it.msg) $('.q-meta', li).textContent = `${it.video ? '🎬 ' : ''}${it.file.name} · ${fmtBytes(it.file.size)} · ${it.msg}`;
 }
 
 const queueItemOf = el => state.queue.find(i => i.key === el.closest('li[data-key]')?.dataset.key);
@@ -1183,6 +1241,8 @@ $('#queue-clear').addEventListener('click', () => {
   state.queue.forEach(i => i.preview && URL.revokeObjectURL(i.preview));
   state.queue = []; renderQueue();
 });
+$('#file-input').accept = 'image/*,video/*,.heic,.heif,.mov,.mp4,.m4v';
+{ const hint = $('#dropzone p.text-xs'); if (hint) hint.textContent = `Poze: JPG, PNG, WebP, HEIC, SVG, GIF · Video: MP4, MOV (iPhone) — comprimat automat la 1080p, max ${Math.round(MAX_FILE_BYTES / 1048576)} MB după compresie`; }
 $('#file-input').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
 
 function openUpload() { if (!upDlg.open) upDlg.showModal(); toggleUpProduct(); upFlowers.refresh(); renderQueue(); }
@@ -1228,22 +1288,70 @@ $('#start-upload').addEventListener('click', async () => {
   toast(`${ok} încărcate${dup ? ` · ${dup} duplicate` : ''}${err ? ` · ${err} erori` : ''}`, err ? 'err' : 'ok');
 });
 
+/** Amprentă rapidă pentru video (fișierele pot fi foarte mari): primii 4 MB + mărimea. */
+async function videoFingerprint(file) {
+  return `v${file.size}-` + await sha256(file.slice(0, 4 * 1024 * 1024));
+}
+
+/** Copertă JPG (max. 1920 px) dintr-un cadru video. */
+const makePoster = frame => makeMaster(new File([], 'poster.jpg', { type: 'image/jpeg' }), frame, false);
+
+/** Compresie + copertă + culori pentru un video din coada de upload. */
+async function prepareVideoItem(it, batch) {
+  const { file } = it;
+  let out, processed = true;
+  try {
+    out = await prepareVideo(file, {
+      maxBytes: MAX_FILE_BYTES,
+      onProgress: (p, attempt) => { it.msg = `${attempt ? 'recomprim (calitate mai mică)' : 'comprim'} ${Math.round(p * 100)}%`; updateQueueItem(it); },
+    });
+  } catch (err) {
+    // browserul nu poate citi formatul (ex. HEVC pe unele PC-uri) → îl încărcăm ca atare, coperta se face mai târziu
+    if (file.size <= MAX_FILE_BYTES && /nesuportat|citi|undecodable|decod/i.test(err.message)) {
+      out = { blob: file, width: 0, height: 0, duration: it.duration, raw: true };
+      processed = false;
+    } else throw err;
+  }
+  let frame = null;
+  if (!out.raw) { try { frame = await videoFrame(out.blob); } catch { processed = false; } }
+  const ext = out.raw ? ((file.name.split('.').pop() || 'mp4').toLowerCase()) : 'mp4';
+  const master = {
+    blob: out.blob, ext,
+    mime: out.raw ? (file.type || (ext === 'mov' ? 'video/quicktime' : 'video/mp4')) : 'video/mp4',
+    width: out.width || frame?.width || 0, height: out.height || frame?.height || 0,
+  };
+  let thumb = null, poster = null, color = null, colors = [];
+  if (frame) {
+    thumb = await makeThumb(frame, false);
+    poster = await makePoster(frame);
+    color = dominantColor(frame);
+    colors = !batch.product ? [] : (it.colorsManual || it.colors) ? (it.colors || []) : detectColors(frame);
+  }
+  return { master, thumb, poster, color, colors, extra: { duration: out.duration ?? null, processed } };
+}
+
 async function processItem(it, batch) {
   const { file } = it;
   it.status = 'working'; updateQueueItem(it);
 
-  const hash = await sha256(file);
+  const hash = it.video ? await videoFingerprint(file) : await sha256(file);
   const dupe = state.assets.find(a => a.sha256 === hash);
   if (dupe) { it.status = 'duplicate'; it.msg = `„${dupe.title}”`; return updateQueueItem(it); }
 
-  const dec = await decode(it.converted ? new File([it.converted], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }) : file);
-  const mayAlpha = isSvg(file) || /png|webp|gif|avif/i.test(file.type || file.name);
-  const alpha = mayAlpha ? hasAlpha(dec) : false;
-  const master = await makeMaster(file, dec, alpha);
-  const thumb = await makeThumb(dec, alpha);
-  const color = alpha ? null : dominantColor(dec);
-  const colors = !batch.product ? [] : (it.colorsManual || it.colors) ? (it.colors || []) : detectColors(dec);
-  dec.source.close?.();
+  let master, thumb, color, colors, poster = null, extra = {};
+  if (it.video) {
+    ({ master, thumb, poster, color, colors, extra } = await prepareVideoItem(it, batch));
+  } else {
+    const dec = await decode(it.converted ? new File([it.converted], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }) : file);
+    const mayAlpha = isSvg(file) || /png|webp|gif|avif/i.test(file.type || file.name);
+    const alpha = mayAlpha ? hasAlpha(dec) : false;
+    master = await makeMaster(file, dec, alpha);
+    thumb = await makeThumb(dec, alpha);
+    color = alpha ? null : dominantColor(dec);
+    colors = !batch.product ? [] : (it.colorsManual || it.colors) ? (it.colors || []) : detectColors(dec);
+    dec.source.close?.();
+  }
+  it.msg = '';
 
   it.status = 'uploading'; updateQueueItem(it);
   const id = crypto.randomUUID();
@@ -1252,7 +1360,8 @@ async function processItem(it, batch) {
   const slug = slugify(it.title) || 'imagine';
   const paths = {
     master: `${dir}/${slug}.${master.ext}`,
-    thumb: `${dir}/thumb.${thumb.ext}`,
+    thumb: thumb ? `${dir}/thumb.${thumb.ext}` : null,
+    poster: poster ? `${dir}/poster.jpg` : null,
     original: batch.keepOriginal ? `${dir}/original-${slug}.${(file.name.split('.').pop() || 'bin').toLowerCase()}` : null,
   };
   const uploaded = [];
@@ -1262,8 +1371,10 @@ async function processItem(it, batch) {
     uploaded.push(path);
   };
   try {
+    if (it.video) { it.msg = 'încarc videoul…'; updateQueueItem(it); }
     await put(paths.master, master.blob, master.mime);
-    await put(paths.thumb, thumb.blob, thumb.blob.type);
+    if (thumb) await put(paths.thumb, thumb.blob, thumb.blob.type);
+    if (poster) await put(paths.poster, poster.blob, 'image/jpeg');
     if (paths.original) await put(paths.original, file, file.type || 'application/octet-stream');
 
     const row = {
@@ -1271,9 +1382,10 @@ async function processItem(it, batch) {
       category_id: batch.category_id, credit: batch.credit,
       tags: [...new Set([...batch.tags, ...it.tags])],
       description: it.description.trim() || null, alt_text: it.alt.trim() || null,
-      master_path: paths.master, thumb_path: paths.thumb, original_path: paths.original,
+      master_path: paths.master, thumb_path: paths.thumb || paths.master, original_path: paths.original,
       mime: master.mime, width: master.width, height: master.height,
-      size_bytes: master.blob.size, thumb_bytes: thumb.blob.size,
+      size_bytes: master.blob.size, thumb_bytes: thumb ? thumb.blob.size : 0,
+      ...(it.video ? { kind: 'video', poster_path: paths.poster, ...extra } : {}),
       original_name: file.name, original_bytes: paths.original ? file.size : null,
       sha256: hash, color, uploader_email: state.user.email,
     };
@@ -1290,8 +1402,10 @@ async function processItem(it, batch) {
     }
     state.assets.unshift(data);
     it.status = 'done';
-    it.msg = colors.length ? 'culori: ' + colors.map(c => colorById(c)?.label).join(', ') : '';
+    it.msg = [it.video ? 'comprimat la ' + fmtBytes(master.blob.size) : '',
+      colors.length ? 'culori: ' + colors.map(c => colorById(c)?.label).join(', ') : ''].filter(Boolean).join(' · ');
     updateQueueItem(it);
+    if (data.processed === false) processPending();
   } catch (err) {
     if (uploaded.length) await store().remove(uploaded);
     if (it.status === 'duplicate') return updateQueueItem(it);
@@ -1358,8 +1472,11 @@ async function processPending() {
   if (processing) return;
   processing = true;
   try {
-    for (const a of state.assets.filter(x => x.processed === false)) {
+    const skipKey = id => `tfs-skip-${id}`;
+    const skipped = id => { try { return Date.now() - Number(localStorage.getItem(skipKey(id)) || 0) < 6 * 3600e3; } catch { return false; } };
+    for (const a of state.assets.filter(x => x.processed === false && !skipped(x.id))) {
       try {
+        if (a.kind === 'video') { await processPendingVideo(a); continue; }
         const dec = await decodeUrl(publicUrl(a.master_path));
         const patch = { processed: true };
         const dir = a.master_path.slice(0, a.master_path.lastIndexOf('/'));
@@ -1390,9 +1507,44 @@ async function processPending() {
         if (card) card.outerHTML = cardHtml(a);
       } catch (err) {
         console.error('Procesare eșuată pentru', a.title, err);
+        try { localStorage.setItem(skipKey(a.id), String(Date.now())); } catch {}
       }
     }
   } finally { processing = false; }
+}
+
+/** Video venit de pe telefon (sau pe care alt browser nu l-a putut citi): H.264 1080p + copertă. */
+async function processPendingVideo(a) {
+  const res = await fetch(publicUrl(a.master_path));
+  if (!res.ok) throw new Error('Nu am putut descărca videoul');
+  const src = new File([await res.blob()], a.master_path.split('/').pop(), { type: a.mime });
+  const dir = a.master_path.slice(0, a.master_path.lastIndexOf('/'));
+  const out = await prepareVideo(src, { maxBytes: MAX_FILE_BYTES });   // aruncă eroare dacă browserul nu-l poate citi → rămâne pentru alt dispozitiv
+  const patch = { processed: true, duration: out.duration, width: out.width, height: out.height };
+  const toRemove = [];
+  if (out.transcoded || !/\.mp4$/.test(a.master_path)) {
+    const path = a.master_path.replace(/\.[^.]+$/, '') + '.mp4';
+    const { error } = await store().upload(path, out.blob, { contentType: 'video/mp4', cacheControl: '31536000', upsert: true });
+    if (error) throw error;
+    if (path !== a.master_path) toRemove.push(a.master_path);
+    Object.assign(patch, { master_path: path, mime: 'video/mp4', size_bytes: out.blob.size });
+  }
+  const frame = await videoFrame(out.blob);
+  const thumb = await makeThumb(frame, false);
+  const poster = await makePoster(frame);
+  const tp = `${dir}/thumb.${thumb.ext}`, pp = `${dir}/poster.jpg`;
+  for (const [path, blob, type] of [[tp, thumb.blob, thumb.blob.type], [pp, poster.blob, 'image/jpeg']]) {
+    const { error } = await store().upload(path, blob, { contentType: type, cacheControl: '31536000', upsert: true });
+    if (error) throw error;
+  }
+  Object.assign(patch, { thumb_path: tp, poster_path: pp, thumb_bytes: thumb.blob.size, color: dominantColor(frame) });
+  if (state.productFields) Object.assign(patch, { colors: detectColors(frame), colors_manual: false });
+  const { error: ue } = await sb.from('assets').update(patch).eq('id', a.id);
+  if (ue) throw ue;
+  if (toRemove.length) await store().remove(toRemove);
+  Object.assign(a, patch);
+  const card = $(`.card[data-id="${a.id}"]`);
+  if (card) card.outerHTML = cardHtml(a);
 }
 
 /** Păstrează pozele în bibliotecă: alegi categoria (+ titlu, flori, tag-uri). */
