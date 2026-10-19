@@ -106,7 +106,9 @@ const state = {
   productFields: false, // true după ce s-a rulat migrarea 02 (flori + culori)
   assets: [],
   filter: { q: '', cat: null, orient: null, kind: null, tags: new Set(), flowers: new Set(), colors: new Set(), sort: 'new' },
-  view: 'library',     // 'library' sau 'review' (De revizuit)
+  view: 'library',     // 'library' | 'review' (De revizuit) | 'products' (Produse Shopify)
+  products: [],
+  productsReady: false,
   selectMode: false,
   selected: new Set(),
   list: [],           // rezultatul filtrat curent
@@ -308,7 +310,8 @@ async function loadFlowers() {
 async function loadAll() {
   $('#loading').hidden = false;
   try {
-    await Promise.all([loadCategories(), loadAssets(), loadFlowers()]);
+    await Promise.all([loadCategories(), loadAssets(), loadFlowers(), loadProducts()]);
+    refreshProductDatalists();
     renderFlowerDatalist();
     upFlowers?.refresh();
   } catch (err) {
@@ -357,6 +360,19 @@ function applyFilter() {
 }
 
 function render() {
+  const productsView = state.view === 'products';
+  $('#pv') && ($('#pv').hidden = !productsView);
+  $('#grid').hidden = productsView;
+  $('#select-mode-btn').hidden = productsView;
+  $('#sort').hidden = productsView;
+  if (productsView) {
+    $('#empty').hidden = true;
+    sentinelObs?.disconnect(); $('#grid-sentinel')?.remove();
+    state.selectMode = false; renderBulkBar();
+    renderSidebar(); renderToolbar(); renderProducts();
+    $('#pv').hidden = false;
+    return;
+  }
   applyFilter();
   renderSidebar();
   renderToolbar();
@@ -425,16 +441,21 @@ function renderSidebar() {
   const counts = new Map();
   for (const a of lib) counts.set(a.category_id, (counts.get(a.category_id) || 0) + 1);
   const nReview = state.assets.length - lib.length;
-  const isLib = state.view !== 'review';
+  const isLib = state.view === 'library';
   const item = (id, name, n) => `
     <button data-cat="${id ?? ''}" class="w-full flex justify-between items-center px-3 py-2 rounded-lg text-sm ${
       isLib && state.filter.cat === id ? 'bg-moss text-white' : 'hover:bg-line/50'}">
       <span class="truncate">${esc(name)}</span><span class="text-xs ${isLib && state.filter.cat === id ? 'text-white/80' : 'text-muted'}">${n}</span></button>`;
-  const reviewItem = nReview || !isLib ? `
+  const reviewItem = nReview || state.view === 'review' ? `
     <button data-review class="w-full flex justify-between items-center px-3 py-2 mb-2 rounded-lg text-sm font-medium ${
-      !isLib ? 'bg-blush-dark text-white' : 'bg-blush-soft text-blush-dark hover:bg-blush/40'}">
-      <span>📱 De revizuit</span><span class="text-xs min-w-[22px] text-center rounded-full px-1.5 py-0.5 ${!isLib ? 'bg-white/25' : 'bg-blush-dark text-white'}">${nReview}</span></button>` : '';
-  $('#cat-list').innerHTML = reviewItem + item(null, 'Toate', lib.length) +
+      state.view === 'review' ? 'bg-blush-dark text-white' : 'bg-blush-soft text-blush-dark hover:bg-blush/40'}">
+      <span>📱 De revizuit</span><span class="text-xs min-w-[22px] text-center rounded-full px-1.5 py-0.5 ${state.view === 'review' ? 'bg-white/25' : 'bg-blush-dark text-white'}">${nReview}</span></button>` : '';
+  const pvActive = state.view === 'products';
+  const productsItem = state.productsReady ? `
+    <button data-products class="w-full flex justify-between items-center px-3 py-2 mb-2 rounded-lg text-sm font-medium ${
+      pvActive ? 'bg-ink text-white' : 'bg-cream border border-line hover:bg-line/50'}">
+      <span>🛍️ Produse Shopify</span><span class="text-xs ${pvActive ? 'text-white/80' : 'text-muted'}">${state.products.length}</span></button>` : '';
+  $('#cat-list').innerHTML = reviewItem + productsItem + item(null, 'Toate', lib.length) +
     state.categories.map(c => item(c.id, c.name, counts.get(c.id) || 0)).join('');
 
   const orients = [[null, 'Toate'], ['landscape', 'Peisaj'], ['portrait', 'Portret'], ['square', 'Pătrat']];
@@ -476,6 +497,12 @@ function renderSidebar() {
 
 function renderToolbar() {
   const f = state.filter;
+  if (state.view === 'products') {
+    $('#view-title').textContent = 'Produse Shopify';
+    $('#result-count').textContent = `${state.products.length} ${state.products.length === 1 ? 'produs' : 'produse'}`;
+    $('#active-filters').innerHTML = '';
+    return;
+  }
   $('#view-title').textContent = state.view === 'review' ? 'De revizuit' : f.cat ? catName(f.cat) : 'Toate imaginile';
   $('#result-count').textContent = `${state.list.length} ${state.list.length === 1 ? 'imagine' : 'imagini'}`;
   const chips = [];
@@ -494,8 +521,11 @@ $('#cat-list').addEventListener('click', e => {
   if (e.target.closest('[data-review]')) {
     state.view = 'review'; state.selected.clear(); closeSidebar(); return render();
   }
+  if (e.target.closest('[data-products]')) {
+    state.view = 'products'; state.selected.clear(); closeSidebar(); return render();
+  }
   const b = e.target.closest('[data-cat]'); if (!b) return;
-  if (state.view === 'review') { state.view = 'library'; state.selected.clear(); }
+  if (state.view !== 'library') { state.view = 'library'; state.selected.clear(); }
   state.filter.cat = b.dataset.cat ? Number(b.dataset.cat) : null;
   closeSidebar(); render();
 });
@@ -530,11 +560,12 @@ $('#flower-filter').addEventListener('click', e => {
 let searchT;
 $('#search').addEventListener('input', e => {
   clearTimeout(searchT);
-  searchT = setTimeout(() => { state.filter.q = e.target.value.trim(); render(); }, 150);
+  searchT = setTimeout(() => { state.filter.q = e.target.value.trim(); if (state.view === 'products') state.view = 'library'; render(); }, 150);
 });
 $('#sort').addEventListener('change', e => { state.filter.sort = e.target.value; render(); });
 $('#home-link').addEventListener('click', e => {
   e.preventDefault();
+  state.view = 'library';
   Object.assign(state.filter, { q: '', cat: null, orient: null, kind: null, tags: new Set(), flowers: new Set(), colors: new Set() });
   $('#search').value = ''; render();
 });
@@ -1388,6 +1419,7 @@ async function processItem(it, batch) {
       ...(it.video ? { kind: 'video', poster_path: paths.poster, ...extra } : {}),
       original_name: file.name, original_bytes: paths.original ? file.size : null,
       sha256: hash, color, uploader_email: state.user.email,
+      ...(state.productsReady && file.lastModified ? { taken_at: new Date(file.lastModified).toISOString() } : {}),
     };
     if (batch.product) {
       const flowers = [...batch.flowers];
@@ -1640,6 +1672,573 @@ function ensureReviewBar() {
     $('#rv-keep').addEventListener('click', () => { const a = state.assets.find(x => x.id === state.detailId); if (a) approveAssets([a]); });
     $('#rv-drop').addEventListener('click', () => { const a = state.assets.find(x => x.id === state.detailId); if (a) rejectAssets([a]); });
   }
+}
+
+
+// ---------------------------------------------------------------- 🛍️ Produse Shopify (grupare + fișă + export CSV)
+const VENDOR_DEFAULT = 'The Flower Station';
+const pvState = { filter: 'all', trayKind: 'all', traySel: new Set(), exportSel: new Set(), saveTimers: new Map() };
+
+async function loadProducts() {
+  const { data, error } = await sb.from('products').select('*').order('created_at', { ascending: false });
+  state.productsReady = !error;
+  state.products = error ? [] : data;
+  if (error) console.warn('Tabelul products lipsește — rulează supabase/migrare-05-produse-shopify.sql', error);
+}
+
+const productImages = p => state.assets
+  .filter(a => a.product_id === p.id && (a.kind || 'image') === 'image')
+  .sort((a, b) => (a.product_position ?? 0) - (b.product_position ?? 0));
+
+/** Poze de produs (categoria Produse, aprobate, imagini) care nu aparțin încă unui produs. */
+const trayAssets = () => state.assets
+  .filter(a => !inReview(a) && (a.kind || 'image') === 'image' && !a.product_id && isProduct(a.category_id))
+  .sort((a, b) => (a.taken_at || a.created_at).localeCompare(b.taken_at || b.created_at));
+
+const fmtPrice = v => (v === null || v === undefined || v === '') ? '' : Number(v).toFixed(2);
+const productAutoTags = p => {
+  const imgs = productImages(p);
+  const fl = [...new Set(imgs.flatMap(a => a.flowers || []))];
+  const co = [...new Set(imgs.flatMap(a => a.colors || []))].map(c => colorById(c)?.label).filter(Boolean);
+  return [...fl, ...co];
+};
+const productState = p => !p.exported_at ? 'new'
+  : (new Date(p.updated_at) - new Date(p.exported_at) > 5000 ? 'changed' : 'exported');
+
+async function uniqueHandle(base, exceptId) {
+  let h = slugify(base) || 'produs', n = 1;
+  const taken = new Set(state.products.filter(p => p.id !== exceptId).map(p => p.handle));
+  while (taken.has(n === 1 ? h : `${h}-${n}`)) n++;
+  return n === 1 ? h : `${h}-${n}`;
+}
+
+// ---------- creare / grupare
+async function createProductFrom(assetIds) {
+  if (!assetIds.length) return null;
+  const first = state.assets.find(a => a.id === assetIds[0]);
+  const title = first ? first.title.replace(/\s*\(.*\)$/, '') : 'Produs nou';
+  const { data, error } = await sb.from('products').insert({
+    title, handle: await uniqueHandle(title), vendor: VENDOR_DEFAULT, status: 'draft',
+  }).select().single();
+  if (error) { toast('Nu am putut crea produsul.', 'err'); return null; }
+  state.products.unshift(data);
+  await assignToProduct(assetIds, data.id);
+  return data;
+}
+
+async function assignToProduct(assetIds, productId) {
+  const p = state.products.find(x => x.id === productId);
+  let pos = p ? productImages(p).length : 0;
+  for (const id of assetIds) {
+    const a = state.assets.find(x => x.id === id);
+    if (!a) continue;
+    const patch = { product_id: productId, product_position: productId ? pos++ : null };
+    const { error } = await sb.from('assets').update(patch).eq('id', id);
+    if (!error) Object.assign(a, patch);
+    pvState.traySel.delete(id);
+  }
+  if (p) touchProduct(p);
+}
+
+async function touchProduct(p) {
+  const { data } = await sb.from('products').update({ title: p.title }).eq('id', p.id).select().single();
+  if (data) Object.assign(p, data); else p.updated_at = new Date().toISOString();
+}
+
+async function reorderImages(p, orderedIds) {
+  for (let i = 0; i < orderedIds.length; i++) {
+    const a = state.assets.find(x => x.id === orderedIds[i]);
+    if (a && a.product_position !== i) {
+      a.product_position = i;
+      await sb.from('assets').update({ product_position: i }).eq('id', a.id);
+    }
+  }
+  touchProduct(p);
+}
+
+/** Grupare automată: poze făcute la mai puțin de `gapMin` minute una de alta = același produs. */
+async function autoGroup() {
+  const items = trayAssets();
+  if (!items.length) return toast('Nu sunt poze fără produs.');
+  const gapMin = 5;
+  const groups = [];
+  for (const a of items) {
+    const t = new Date(a.taken_at || a.created_at).getTime();
+    const g = groups[groups.length - 1];
+    if (g && t - g.last <= gapMin * 60e3) { g.ids.push(a.id); g.last = t; }
+    else groups.push({ ids: [a.id], last: t });
+  }
+  const ok = await ask({
+    title: `Grupez ${items.length} poze în ${groups.length} produse?`, ok: 'Grupează',
+    body: `<p class="text-sm text-muted">Pozele făcute la mai puțin de ${gapMin} minute una de alta intră în același produs.
+      După aceea poți muta pozele între produse prin tragere.</p>`,
+  });
+  if (!ok) return;
+  for (const g of groups) await createProductFrom(g.ids);
+  toast(`${groups.length} produse create`);
+  renderProducts();
+}
+
+async function deleteProduct(p) {
+  const ok = await ask({
+    title: 'Ștergi produsul?', ok: 'Șterge', danger: true,
+    body: '<p class="text-sm text-muted">Pozele rămân în bibliotecă și revin la „Poze fără produs”. Din Shopify nu se șterge nimic.</p>',
+  });
+  if (!ok) return;
+  const { error } = await sb.from('products').delete().eq('id', p.id);
+  if (error) return toast('Nu am putut șterge produsul.', 'err');
+  state.assets.forEach(a => { if (a.product_id === p.id) { a.product_id = null; a.product_position = null; } });
+  state.products = state.products.filter(x => x !== p);
+  pvState.exportSel.delete(p.id);
+  renderProducts();
+}
+
+// ---------- salvare automată a fișei
+function queueSave(p, patch) {
+  Object.assign(p, patch);
+  clearTimeout(pvState.saveTimers.get(p.id));
+  pvState.saveTimers.set(p.id, setTimeout(async () => {
+    const fields = ['title', 'handle', 'description', 'vendor', 'product_type', 'collection', 'tags', 'price', 'compare_at_price',
+      'status', 'has_variants', 'option_name', 'variants', 'seo_title', 'seo_description'];
+    const row = Object.fromEntries(fields.map(k => [k, p[k]]));
+    const { data, error } = await sb.from('products').update(row).eq('id', p.id).select().single();
+    if (error) {
+      toast(error.code === '23505' ? 'Există deja un produs cu acest URL handle.' : 'Nu am putut salva produsul.', 'err');
+      return;
+    }
+    Object.assign(p, data);
+    const badge = $(`#pv-list [data-pid="${p.id}"] .pv-state`);
+    if (badge) badge.outerHTML = stateBadge(p);
+  }, 600));
+}
+
+const stateBadge = p => {
+  const s = productState(p);
+  const map = {
+    new: ['Neexportat', 'bg-line text-muted'],
+    exported: [`Exportat ${fmtDate(p.exported_at)}`, 'bg-moss-soft text-moss'],
+    changed: ['Modificat după export', 'bg-blush-soft text-blush-dark'],
+  }[s];
+  return `<span class="pv-state text-[11px] px-2 py-0.5 rounded-full whitespace-nowrap ${map[1]}">${map[0]}</span>`;
+};
+
+// ---------- randare
+function ensureProductsView() {
+  if ($('#pv')) return;
+  $('#grid').insertAdjacentHTML('beforebegin', `
+    <div id="pv" class="grid lg:grid-cols-[minmax(0,1fr)_340px] gap-5 items-start" hidden>
+      <section class="min-w-0 order-2 lg:order-1">
+        <div class="flex flex-wrap items-center gap-2 mb-3">
+          <div id="pv-filter" class="flex gap-1"></div>
+          <button id="pv-export" class="ml-auto inline-flex items-center gap-2 rounded-full bg-moss hover:bg-moss-dark text-white px-4 py-2 text-sm font-medium">⬇ Descarcă CSV pentru Shopify</button>
+        </div>
+        <div id="pv-list" class="space-y-4"></div>
+      </section>
+      <aside class="order-1 lg:order-2 lg:sticky lg:top-20 rounded-2xl border border-line bg-paper p-3 min-w-0">
+        <div class="flex items-center justify-between gap-2">
+          <h3 class="font-medium text-sm">Poze fără produs <span id="pv-tray-count" class="text-muted"></span></h3>
+          <button id="pv-auto" class="text-xs text-moss hover:underline">⚡ Grupează automat</button>
+        </div>
+        <p class="text-[11px] text-muted mt-0.5">Poze din categoria Produse. Selectează-le sau trage-le pe un produs.</p>
+        <div id="pv-tray" class="grid grid-cols-3 gap-1.5 mt-2 max-h-[52vh] overflow-y-auto scrollbar-thin"></div>
+        <div class="grid gap-2 mt-3">
+          <button id="pv-new" class="rounded-full bg-ink text-white text-sm py-2 disabled:opacity-40" disabled>+ Produs din selecție</button>
+          <select id="pv-addto" class="w-full min-w-0 rounded-full border border-line bg-paper text-sm px-3 py-2 disabled:opacity-40" disabled></select>
+        </div>
+      </aside>
+    </div>`);
+  bindProductsView();
+}
+
+function renderProducts() {
+  ensureProductsView();
+  const tray = trayAssets();
+  $('#pv-tray-count').textContent = `(${tray.length})`;
+  $('#pv-tray').innerHTML = tray.length ? tray.map(a => `
+    <button type="button" draggable="true" data-aid="${a.id}" title="${esc(a.title)}"
+      class="pv-thumb relative aspect-square rounded-lg overflow-hidden bg-cream ${pvState.traySel.has(a.id) ? 'ring-2 ring-moss ring-offset-1' : ''}">
+      <img src="${publicUrl(a.thumb_path)}" alt="" loading="lazy" class="w-full h-full object-cover pointer-events-none" />
+      ${pvState.traySel.has(a.id) ? '<span class="absolute top-1 left-1 w-5 h-5 rounded-full bg-moss text-white text-[11px] grid place-items-center">✓</span>' : ''}
+    </button>`).join('')
+    : '<p class="col-span-3 text-xs text-muted py-6 text-center">Toate pozele de produs sunt grupate. Pozele noi din categoria Produse apar aici.</p>';
+  const nSel = pvState.traySel.size;
+  $('#pv-new').disabled = !nSel;
+  $('#pv-new').textContent = nSel ? `+ Produs din ${nSel} ${nSel === 1 ? 'poză' : 'poze'}` : '+ Produs din selecție';
+  const addto = $('#pv-addto');
+  addto.disabled = !nSel || !state.products.length;
+  addto.innerHTML = '<option value="">Adaugă la produs…</option>' +
+    state.products.map(p => `<option value="${p.id}">${esc(p.title || 'Fără titlu')}</option>`).join('');
+
+  const counts = { all: state.products.length, todo: state.products.filter(p => productState(p) !== 'exported').length };
+  $('#pv-filter').innerHTML = [['all', `Toate (${counts.all})`], ['todo', `De exportat (${counts.todo})`]].map(([k, l]) => `
+    <button data-f="${k}" class="text-xs px-3 py-1.5 rounded-full border ${pvState.filter === k ? 'bg-ink text-white border-ink' : 'border-line bg-paper hover:bg-cream'}">${l}</button>`).join('');
+
+  const list = state.products.filter(p => pvState.filter === 'all' || productState(p) !== 'exported');
+  $('#pv-list').innerHTML = list.length ? list.map(productCardHtml).join('') : `
+    <div class="text-center py-16 rounded-2xl border border-dashed border-line">
+      <div class="text-4xl mb-2">🛍️</div>
+      <p class="font-serif text-xl">${state.products.length ? 'Toate produsele sunt exportate' : 'Niciun produs încă'}</p>
+      <p class="text-muted text-sm mt-1">Selectează poze din dreapta și apasă „+ Produs din selecție”, sau „⚡ Grupează automat”.</p>
+    </div>`;
+  for (const p of list) mountProductCard(p);
+  const nP = state.products.length;
+  $('#result-count').textContent = `${nP} ${nP === 1 ? 'produs' : 'produse'}`;
+  const sideCount = $('#cat-list [data-products] span:last-child');
+  if (sideCount) sideCount.textContent = nP;
+  const nExp = [...pvState.exportSel].filter(id => state.products.some(p => p.id === id)).length;
+  $('#pv-export').textContent = nExp ? `⬇ Descarcă CSV (${nExp} selectate)` : '⬇ Descarcă CSV pentru Shopify';
+}
+
+function productCardHtml(p) {
+  const imgs = productImages(p);
+  const field = 'mt-1 w-full rounded-lg border border-line bg-paper px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-moss/30';
+  const auto = productAutoTags(p);
+  const variants = Array.isArray(p.variants) ? p.variants : [];
+  return `
+  <article data-pid="${p.id}" class="pv-card rounded-2xl border border-line bg-paper p-4 shadow-card">
+    <div class="flex items-start gap-3">
+      <input type="checkbox" class="pv-pick mt-2.5 w-4 h-4 accent-moss" title="Include la export" ${pvState.exportSel.has(p.id) ? 'checked' : ''} />
+      <input data-k="title" value="${esc(p.title)}" placeholder="Numele produsului (ex. Buchet 25 trandafiri roz)"
+        class="flex-1 min-w-0 font-serif text-xl bg-transparent border-b border-dashed border-line hover:border-muted focus:border-moss outline-none py-1" />
+      <div class="flex items-center gap-2 shrink-0 pt-1.5">
+        ${stateBadge(p)}
+        <div class="inline-flex rounded-full border border-line overflow-hidden text-xs" role="group" aria-label="Stare în Shopify">
+          <button type="button" data-status="draft" class="px-2.5 py-1 ${p.status === 'draft' ? 'bg-ink text-white' : 'bg-paper hover:bg-cream'}">Draft</button>
+          <button type="button" data-status="active" class="px-2.5 py-1 ${p.status === 'active' ? 'bg-moss text-white' : 'bg-paper hover:bg-cream'}">Activ</button>
+        </div>
+        <button type="button" class="pv-del w-8 h-8 rounded-full hover:bg-cream text-muted" title="Șterge produsul">🗑</button>
+      </div>
+    </div>
+
+    <div class="pv-strip mt-3 flex gap-2 overflow-x-auto scrollbar-thin rounded-xl border-2 border-dashed border-transparent p-1 -m-1 min-h-[96px]">
+      ${imgs.map((a, i) => `
+        <div draggable="true" data-aid="${a.id}" class="pv-img relative shrink-0 w-24 h-24 rounded-lg overflow-hidden bg-cream cursor-grab">
+          <img src="${publicUrl(a.thumb_path)}" alt="" class="w-full h-full object-cover pointer-events-none" />
+          ${i === 0 ? '<span class="absolute bottom-1 left-1 text-[10px] px-1.5 rounded bg-ink/80 text-white">principală</span>' : ''}
+          <button type="button" class="pv-unlink absolute top-1 right-1 w-5 h-5 rounded-full bg-white/90 text-xs text-ink hover:bg-white" title="Scoate din produs">×</button>
+        </div>`).join('')}
+      <div class="shrink-0 w-24 h-24 rounded-lg border border-dashed border-line grid place-items-center text-[11px] text-muted text-center px-1">Trage poze aici</div>
+    </div>
+
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 text-sm">
+      <label class="block ${p.has_variants ? 'opacity-40' : ''}"><span class="text-muted">Preț (lei)</span>
+        <input data-k="price" type="number" step="0.01" min="0" inputmode="decimal" value="${fmtPrice(p.price)}" class="${field}" ${p.has_variants ? 'disabled' : ''} /></label>
+      <label class="block ${p.has_variants ? 'opacity-40' : ''}"><span class="text-muted">Preț vechi</span>
+        <input data-k="compare_at_price" type="number" step="0.01" min="0" inputmode="decimal" value="${fmtPrice(p.compare_at_price)}" placeholder="opțional" class="${field}" ${p.has_variants ? 'disabled' : ''} /></label>
+      <label class="block"><span class="text-muted">Colecție</span>
+        <input data-k="collection" list="pv-collections" value="${esc(p.collection || '')}" placeholder="ex. Buchete" class="${field}" /></label>
+      <label class="block"><span class="text-muted">Tip produs</span>
+        <input data-k="product_type" list="pv-types" value="${esc(p.product_type || '')}" placeholder="ex. Buchet" class="${field}" /></label>
+    </div>
+
+    <label class="block mt-3 text-sm"><span class="text-muted">Descriere</span>
+      <textarea data-k="description" rows="3" class="${field}" placeholder="Ce conține buchetul, dimensiuni, ocazii…">${esc(p.description || '')}</textarea></label>
+
+    <div class="mt-3 text-sm">
+      <label class="inline-flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" class="pv-hasvar accent-moss" ${p.has_variants ? 'checked' : ''} />
+        <span>Are variante <span class="text-muted">(ex. mărimi cu prețuri diferite)</span></span></label>
+      ${p.has_variants ? `
+      <div class="mt-2 rounded-xl bg-cream/60 border border-line p-3 space-y-2">
+        <label class="flex items-center gap-2"><span class="text-muted shrink-0">Nume opțiune</span>
+          <input data-k="option_name" value="${esc(p.option_name || 'Mărime')}" class="flex-1 min-w-0 rounded-lg border border-line bg-paper px-2.5 py-1.5" /></label>
+        <div class="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 text-xs text-muted px-0.5"><span>Valoare</span><span>Preț (lei)</span><span>Preț vechi</span><span class="w-7"></span></div>
+        ${variants.map((v, i) => `
+        <div class="pv-var grid grid-cols-[1fr_1fr_1fr_auto] gap-2" data-i="${i}">
+          <input data-v="value" value="${esc(v.value || '')}" placeholder="ex. M / 25 fire" class="min-w-0 rounded-lg border border-line bg-paper px-2.5 py-1.5" />
+          <input data-v="price" type="number" step="0.01" min="0" value="${fmtPrice(v.price)}" class="min-w-0 rounded-lg border border-line bg-paper px-2.5 py-1.5" />
+          <input data-v="compare_at_price" type="number" step="0.01" min="0" value="${fmtPrice(v.compare_at_price)}" placeholder="opțional" class="min-w-0 rounded-lg border border-line bg-paper px-2.5 py-1.5" />
+          <button type="button" class="pv-delvar w-7 h-7 rounded-full hover:bg-paper text-muted" title="Șterge varianta">×</button>
+        </div>`).join('')}
+        <button type="button" class="pv-addvar text-xs text-moss hover:underline">+ Adaugă variantă</button>
+      </div>` : ''}
+    </div>
+
+    <div class="mt-3 text-sm"><span class="text-muted">Tag-uri</span>
+      <div class="pv-tags mt-1"></div>
+      ${auto.length ? `<p class="text-[11px] text-muted mt-1">Se adaugă automat din poze: ${auto.map(esc).join(', ')}</p>` : ''}</div>
+
+    <details class="mt-3 text-sm group">
+      <summary class="cursor-pointer text-muted hover:text-ink select-none">SEO și link produs</summary>
+      <div class="grid gap-3 mt-2">
+        <label class="block"><span class="text-muted">URL handle</span>
+          <div class="flex items-center gap-1 mt-1"><span class="text-xs text-muted whitespace-nowrap">theflowerstation.ro/products/</span>
+          <input data-k="handle" value="${esc(p.handle || '')}" class="flex-1 min-w-0 rounded-lg border border-line bg-paper px-2.5 py-1.5 font-mono text-xs" /></div></label>
+        <label class="block"><span class="text-muted">Titlu SEO</span>
+          <input data-k="seo_title" value="${esc(p.seo_title || '')}" placeholder="Implicit: numele produsului" maxlength="70" class="${field}" /></label>
+        <label class="block"><span class="text-muted">Descriere SEO</span>
+          <textarea data-k="seo_description" rows="2" maxlength="320" placeholder="Implicit: începutul descrierii" class="${field}">${esc(p.seo_description || '')}</textarea></label>
+      </div>
+    </details>
+  </article>`;
+}
+
+function mountProductCard(p) {
+  const card = $(`#pv-list [data-pid="${p.id}"]`);
+  if (!card) return;
+  tagInput($('.pv-tags', card), p.tags || [], v => queueSave(p, { tags: [...v] }));
+}
+
+// datalist-uri pentru colecții / tipuri folosite deja
+function refreshProductDatalists() {
+  const uniq = k => [...new Set(state.products.map(p => p[k]).filter(Boolean))].sort();
+  for (const [id, k, extra] of [['pv-collections', 'collection', ['Buchete', 'Aranjamente', 'Cutii cu flori', 'Plante', 'Nunți']],
+                                ['pv-types', 'product_type', ['Buchet', 'Aranjament', 'Cutie cu flori', 'Plantă']]]) {
+    let dl = $('#' + id);
+    if (!dl) { document.body.insertAdjacentHTML('beforeend', `<datalist id="${id}"></datalist>`); dl = $('#' + id); }
+    dl.innerHTML = [...new Set([...uniq(k), ...extra])].map(v => `<option value="${esc(v)}">`).join('');
+  }
+}
+
+// ---------- evenimente
+function bindProductsView() {
+  const pv = $('#pv');
+  const productOf = el => state.products.find(p => p.id === el.closest('[data-pid]')?.dataset.pid);
+
+  $('#pv-filter').addEventListener('click', e => {
+    const f = e.target.closest('[data-f]')?.dataset.f; if (!f) return;
+    pvState.filter = f; renderProducts();
+  });
+  $('#pv-auto').addEventListener('click', autoGroup);
+  $('#pv-tray').addEventListener('click', e => {
+    const id = e.target.closest('[data-aid]')?.dataset.aid; if (!id) return;
+    if (e.detail === 2) return openDetail(id);
+    pvState.traySel.has(id) ? pvState.traySel.delete(id) : pvState.traySel.add(id);
+    renderProducts();
+  });
+  $('#pv-new').addEventListener('click', async () => {
+    const ids = trayAssets().filter(a => pvState.traySel.has(a.id)).map(a => a.id);
+    const p = await createProductFrom(ids);
+    if (p) { refreshProductDatalists(); renderProducts(); $(`#pv-list [data-pid="${p.id}"] [data-k="title"]`)?.select(); }
+  });
+  $('#pv-addto').addEventListener('change', async e => {
+    const pid = e.target.value; if (!pid) return;
+    await assignToProduct(trayAssets().filter(a => pvState.traySel.has(a.id)).map(a => a.id), pid);
+    renderProducts();
+  });
+
+  const list = $('#pv-list');
+  list.addEventListener('input', e => {
+    const p = productOf(e.target); if (!p) return;
+    const k = e.target.dataset.k, vk = e.target.dataset.v;
+    if (k) {
+      let val = e.target.value;
+      if (k === 'price' || k === 'compare_at_price') val = val === '' ? null : Number(val);
+      if (k === 'handle') val = slugify(val) || null;
+      queueSave(p, { [k]: val });
+    } else if (vk) {
+      const i = Number(e.target.closest('.pv-var').dataset.i);
+      const variants = [...(p.variants || [])];
+      variants[i] = { ...variants[i], [vk]: vk === 'value' ? e.target.value : (e.target.value === '' ? null : Number(e.target.value)) };
+      queueSave(p, { variants });
+    }
+  });
+  list.addEventListener('change', async e => {
+    const p = productOf(e.target); if (!p) return;
+    if (e.target.dataset.k === 'title' && (!p.handle || productState(p) === 'new')) {
+      const handle = await uniqueHandle(p.title, p.id);
+      queueSave(p, { handle });
+      const h = $(`[data-pid="${p.id}"] [data-k="handle"]`); if (h) h.value = handle;
+    }
+    if (e.target.classList.contains('pv-pick')) {
+      e.target.checked ? pvState.exportSel.add(p.id) : pvState.exportSel.delete(p.id);
+      renderProducts();
+    }
+    if (e.target.classList.contains('pv-hasvar')) {
+      const on = e.target.checked;
+      const variants = on && !(p.variants || []).length
+        ? [{ value: 'S', price: p.price ?? null, compare_at_price: null }, { value: 'M', price: null, compare_at_price: null }, { value: 'L', price: null, compare_at_price: null }]
+        : p.variants;
+      queueSave(p, { has_variants: on, variants });
+      renderProducts();
+    }
+  });
+  list.addEventListener('click', e => {
+    const p = productOf(e.target); if (!p) return;
+    const st = e.target.closest('[data-status]')?.dataset.status;
+    if (st) { queueSave(p, { status: st }); return renderProducts(); }
+    if (e.target.closest('.pv-del')) return deleteProduct(p);
+    if (e.target.closest('.pv-addvar')) { queueSave(p, { variants: [...(p.variants || []), { value: '', price: null, compare_at_price: null }] }); return renderProducts(); }
+    if (e.target.closest('.pv-delvar')) {
+      const i = Number(e.target.closest('.pv-var').dataset.i);
+      queueSave(p, { variants: (p.variants || []).filter((_, j) => j !== i) }); return renderProducts();
+    }
+    if (e.target.closest('.pv-unlink')) {
+      const id = e.target.closest('[data-aid]').dataset.aid;
+      assignToProduct([id], null).then(() => {
+        const rest = productImages(p).map(a => a.id);
+        reorderImages(p, rest).then(renderProducts);
+      });
+      return;
+    }
+    const img = e.target.closest('.pv-img');
+    if (img && e.detail === 2) openDetail(img.dataset.aid);
+  });
+
+  // drag & drop: din tavă pe produs, între produse, reordonare în produs
+  pv.addEventListener('dragstart', e => {
+    const el = e.target.closest('[data-aid]'); if (!el) return;
+    const id = el.dataset.aid;
+    const ids = el.closest('#pv-tray') && pvState.traySel.has(id) ? [...pvState.traySel] : [id];
+    e.dataTransfer.setData('text/x-tfs-assets', JSON.stringify(ids));
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  pv.addEventListener('dragover', e => {
+    if (![...e.dataTransfer.types].includes('text/x-tfs-assets')) return;
+    const strip = e.target.closest('.pv-strip'); if (!strip) return;
+    e.preventDefault();
+    $$('.pv-strip', pv).forEach(s => s.classList.toggle('border-moss', s === strip));
+  });
+  pv.addEventListener('dragleave', e => { if (!e.relatedTarget || !pv.contains(e.relatedTarget)) $$('.pv-strip', pv).forEach(s => s.classList.remove('border-moss')); });
+  pv.addEventListener('drop', async e => {
+    const strip = e.target.closest('.pv-strip'); if (!strip) return;
+    e.preventDefault();
+    $$('.pv-strip', pv).forEach(s => s.classList.remove('border-moss'));
+    const ids = JSON.parse(e.dataTransfer.getData('text/x-tfs-assets') || '[]');
+    const p = productOf(strip); if (!p || !ids.length) return;
+    const beforeId = e.target.closest('.pv-img')?.dataset.aid;
+    const moving = ids.filter(id => state.assets.find(a => a.id === id)?.product_id !== p.id);
+    if (moving.length) {
+      const olds = new Set(moving.map(id => state.assets.find(a => a.id === id)?.product_id).filter(Boolean));
+      await assignToProduct(moving, p.id);
+      for (const oid of olds) { const op = state.products.find(x => x.id === oid); if (op) await reorderImages(op, productImages(op).map(a => a.id)); }
+    }
+    // reordonare: punem pozele trase înaintea celei peste care au fost lăsate
+    let order = productImages(p).map(a => a.id).filter(id => !ids.includes(id));
+    const at = beforeId && !ids.includes(beforeId) ? order.indexOf(beforeId) : order.length;
+    order.splice(at < 0 ? order.length : at, 0, ...ids);
+    await reorderImages(p, order);
+    renderProducts();
+  });
+
+  $('#pv-export').addEventListener('click', exportShopifyCsv);
+}
+
+// ---------- export CSV
+const SHOPIFY_COLUMNS = ['Title', 'URL handle', 'Description', 'Vendor', 'Type', 'Tags', 'Published on online store', 'Status',
+  'Option1 name', 'Option1 value', 'Price', 'Compare-at price', 'Product image URL', 'Image position', 'Image alt text',
+  'SEO title', 'SEO description', 'Collection'];
+
+const csvCell = v => {
+  const s = v === null || v === undefined ? '' : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+const textToHtml = t => (t || '').trim().split(/\n{2,}/).filter(Boolean)
+  .map(par => `<p>${esc(par).replace(/\n/g, '<br>')}</p>`).join('');
+
+function productProblems(p) {
+  const out = [];
+  if (!p.title?.trim()) out.push('lipsește numele');
+  if (!productImages(p).length) out.push('nu are poze');
+  if (p.has_variants) {
+    const v = (p.variants || []).filter(x => x.value?.trim());
+    if (!v.length) out.push('nu are variante completate');
+    else if (v.some(x => x.price === null || x.price === undefined || x.price === '')) out.push('o variantă nu are preț');
+  } else if (p.price === null || p.price === undefined || p.price === '') out.push('lipsește prețul');
+  return out;
+}
+
+/** Rândurile CSV ale unui produs: rândul 1 are fișa completă, restul doar variante / poze. */
+function productCsvRows(p, statusOverride) {
+  const status = statusOverride || p.status;
+  const imgs = productImages(p);
+  const tags = [...new Set([...(p.tags || []), ...productAutoTags(p)].map(t => String(t).trim()).filter(Boolean))];
+  const variants = p.has_variants
+    ? (p.variants || []).filter(v => v.value?.trim())
+    : [{ value: 'Default Title', price: p.price, compare_at_price: p.compare_at_price }];
+  const optionName = p.has_variants ? (p.option_name || 'Mărime') : 'Title';
+  const plainDesc = (p.description || '').replace(/\s+/g, ' ').trim();
+  const rows = [];
+  const n = Math.max(variants.length, imgs.length);
+  for (let i = 0; i < n; i++) {
+    const v = variants[i], img = imgs[i];
+    const r = Object.fromEntries(SHOPIFY_COLUMNS.map(c => [c, '']));
+    r['URL handle'] = p.handle;
+    if (i === 0) Object.assign(r, {
+      'Title': p.title.trim(),
+      'Description': textToHtml(p.description),
+      'Vendor': p.vendor || VENDOR_DEFAULT,
+      'Type': p.product_type || '',
+      'Tags': tags.join(', '),
+      'Published on online store': status === 'active' ? 'TRUE' : 'FALSE',
+      'Status': status,
+      'Option1 name': optionName,
+      'SEO title': p.seo_title || p.title.trim(),
+      'SEO description': p.seo_description || plainDesc.slice(0, 300),
+      'Collection': p.collection || '',
+    });
+    if (v) Object.assign(r, {
+      'Option1 value': v.value.trim(),
+      'Price': fmtPrice(v.price),
+      'Compare-at price': fmtPrice(v.compare_at_price),
+    });
+    if (img) Object.assign(r, {
+      'Product image URL': publicUrl(img.master_path),
+      'Image position': i + 1,
+      'Image alt text': img.alt_text || p.title.trim(),
+    });
+    rows.push(r);
+  }
+  return rows;
+}
+
+async function exportShopifyCsv() {
+  const selected = state.products.filter(p => pvState.exportSel.has(p.id));
+  const pending = state.products.filter(p => productState(p) !== 'exported');
+  const res = await ask({
+    title: 'Export pentru Shopify', ok: '⬇ Descarcă CSV',
+    body: `
+      <div class="space-y-4 text-sm">
+        <fieldset class="space-y-1.5"><legend class="text-muted mb-1">Ce export</legend>
+          ${selected.length ? `<label class="flex gap-2"><input type="radio" name="w" value="sel" checked class="accent-moss" /> Produsele bifate (${selected.length})</label>` : ''}
+          <label class="flex gap-2"><input type="radio" name="w" value="todo" ${selected.length ? '' : 'checked'} class="accent-moss" /> Neexportate sau modificate (${pending.length})</label>
+          <label class="flex gap-2"><input type="radio" name="w" value="all" class="accent-moss" /> Toate produsele (${state.products.length})</label>
+        </fieldset>
+        <fieldset class="space-y-1.5"><legend class="text-muted mb-1">Stare în Shopify</legend>
+          <label class="flex gap-2"><input type="radio" name="s" value="" checked class="accent-moss" /> Cum e setat la fiecare produs</label>
+          <label class="flex gap-2"><input type="radio" name="s" value="draft" class="accent-moss" /> Toate ca <b>Draft</b> (le verifici în Shopify)</label>
+          <label class="flex gap-2"><input type="radio" name="s" value="active" class="accent-moss" /> Toate <b>Active</b> (apar direct pe site)</label>
+        </fieldset>
+      </div>`,
+    collect: b => ({ which: $('input[name=w]:checked', b)?.value, status: $('input[name=s]:checked', b)?.value || null }),
+  });
+  if (!res) return;
+  const items = res.which === 'sel' ? selected : res.which === 'all' ? state.products : pending;
+  if (!items.length) return toast('Nu e niciun produs de exportat.', 'err');
+
+  const bad = items.map(p => [p, productProblems(p)]).filter(([, pr]) => pr.length);
+  if (bad.length) {
+    const go = await ask({
+      title: `${bad.length} ${bad.length === 1 ? 'produs nu e complet' : 'produse nu sunt complete'}`, ok: 'Exportă doar pe cele complete',
+      body: `<ul class="text-sm space-y-1 max-h-60 overflow-auto">${bad.map(([p, pr]) =>
+        `<li><b>${esc(p.title || 'Fără titlu')}</b> — <span class="text-blush-dark">${pr.join(', ')}</span></li>`).join('')}</ul>`,
+    });
+    if (!go) return;
+  }
+  const ready = items.filter(p => !productProblems(p).length);
+  if (!ready.length) return toast('Niciun produs complet de exportat.', 'err');
+
+  const rows = ready.flatMap(p => productCsvRows(p, res.status));
+  const csv = [SHOPIFY_COLUMNS.map(csvCell).join(','), ...rows.map(r => SHOPIFY_COLUMNS.map(c => csvCell(r[c])).join(','))].join('\r\n');
+  saveBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `shopify-produse-${new Date().toISOString().slice(0, 10)}.csv`);
+
+  const now = new Date().toISOString();
+  for (const p of ready) {
+    const patch = { exported_at: now, ...(res.status ? { status: res.status } : {}) };
+    const { data } = await sb.from('products').update(patch).eq('id', p.id).select().single();
+    Object.assign(p, data || patch);
+  }
+  pvState.exportSel.clear();
+  renderProducts();
+  await ask({
+    title: `✓ ${ready.length} ${ready.length === 1 ? 'produs exportat' : 'produse exportate'}`, ok: 'Am înțeles',
+    body: `<ol class="text-sm space-y-1.5 list-decimal pl-5">
+      <li>În Shopify: <b>Produse → Importă</b>.</li>
+      <li>Alege fișierul descărcat.</li>
+      <li>Dacă reimporți produse deja existente, bifează <b>„Suprascrie produsele cu același URL handle”</b>.</li>
+      <li><b>Încarcă și continuă</b> → verifică previzualizarea → <b>Importă produsele</b>.</li></ol>
+      <p class="text-xs text-muted mt-3">Shopify descarcă singur pozele din bibliotecă (poate dura câteva minute).</p>`,
+  });
 }
 
 initAuth();
