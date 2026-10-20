@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Blog · The Flower Station</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌷</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            serif: ['Fraunces', 'Georgia', 'serif'],
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+          colors: {
+            cream: '#FAF7F2', paper: '#FFFFFF', line: '#E9E2D8', ink: '#1F2A24', muted: '#6B7069',
+            moss:  { DEFAULT: '#2F5D4A', dark: '#244839', soft: '#E4EDE7' },
+            blush: { DEFAULT: '#E8B7A8', soft: '#F8E9E3', dark: '#B9705C' },
+          },
+          boxShadow: { card: '0 1px 2px rgba(31,42,36,.06), 0 8px 24px -12px rgba(31,42,36,.18)' },
+        },
+      },
+    };
+  </script>
+  <style>
+    body { background: #FAF7F2; color: #1F2A24; }
+    .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: #E9E2D8; border-radius: 8px; }
+    dialog::backdrop { background: rgba(31,42,36,.55); backdrop-filter: blur(2px); }
+    .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+    [hidden] { display: none !important; }
+    /* editorul de articol */
+    .prose-ed { font-size: 16px; line-height: 1.75; color: #1F2A24; outline: none; min-height: 420px; }
+    .prose-ed:empty::before { content: attr(data-placeholder); color: #8A8F88; }
+    .prose-ed h2 { font-family: Fraunces, Georgia, serif; font-size: 1.55rem; line-height: 1.25; margin: 1.6em 0 .5em; font-weight: 500; }
+    .prose-ed h3 { font-size: 1.15rem; font-weight: 600; margin: 1.3em 0 .4em; }
+    .prose-ed p { margin: 0 0 1em; }
+    .prose-ed ul, .prose-ed ol { margin: 0 0 1em; padding-left: 1.4em; }
+    .prose-ed ul { list-style: disc; } .prose-ed ol { list-style: decimal; }
+    .prose-ed li { margin: .25em 0; }
+    .prose-ed a { color: #2F5D4A; text-decoration: underline; }
+    .prose-ed .tfs-produs { user-select: none; cursor: default; position: relative; }
+    .prose-ed .tfs-produs:hover { outline: 2px solid #E8B7A8; outline-offset: 2px; }
+    .prose-ed .tfs-produs:hover::after { content: 'click pentru a-l scoate'; position: absolute; top: -10px; right: 10px; font-size: 11px; background: #B9705C; color: #fff; padding: 1px 8px; border-radius: 999px; }
+  </style>
+</head>
+<body class="font-sans antialiased min-h-screen">
+
+  <!-- ============ LOGIN ============ -->
+  <section id="auth-view" class="min-h-screen grid place-items-center px-4" hidden>
+    <div class="w-full max-w-sm">
+      <div class="text-center mb-8">
+        <div class="text-4xl mb-3">🌷</div>
+        <h1 class="font-serif text-3xl tracking-tight">The Flower Station</h1>
+        <p class="text-muted mt-1">Blog</p>
+      </div>
+      <form id="login-form" class="bg-paper border border-line rounded-2xl p-6 shadow-card space-y-4">
+        <label class="block">
+          <span class="text-sm font-medium">Email</span>
+          <input name="email" type="email" required autocomplete="email"
+            class="mt-1 w-full rounded-lg border border-line bg-cream/50 px-3 py-2.5 outline-none focus:ring-2 focus:ring-moss/40" />
+        </label>
+        <label class="block">
+          <span class="text-sm font-medium">Parolă</span>
+          <input name="password" type="password" autocomplete="current-password"
+            class="mt-1 w-full rounded-lg border border-line bg-cream/50 px-3 py-2.5 outline-none focus:ring-2 focus:ring-moss/40" />
+        </label>
+        <button class="w-full rounded-lg bg-moss hover:bg-moss-dark text-white font-medium py-2.5 transition">Intră în cont</button>
+        <button type="button" id="magic-link-btn" class="w-full text-sm text-moss hover:underline">Trimite-mi un link de autentificare pe email</button>
+        <p id="login-msg" class="text-sm text-center" hidden></p>
+      </form>
+      <p class="text-xs text-muted text-center mt-6">Conturile se creează de către administrator.</p>
+    </div>
+  </section>
+
+  <!-- ============ APP ============ -->
+  <section id="app-view" hidden>
+    <header class="sticky top-0 z-30 bg-cream/90 backdrop-blur border-b border-line">
+      <div class="max-w-6xl mx-auto flex items-center gap-3 px-4 h-16">
+        <div class="flex items-baseline gap-2 min-w-0">
+          <span class="text-2xl sm:hidden" aria-hidden="true">🌷</span>
+          <span class="hidden sm:inline font-serif text-xl tracking-tight">The Flower Station</span>
+        </div>
+        <nav class="flex items-center gap-1 text-sm" aria-label="Secțiuni">
+          <a href="index.html" class="px-3 py-1.5 rounded-full text-muted hover:text-ink hover:bg-paper">Produse</a>
+          <a href="blog.html" aria-current="page" class="px-3 py-1.5 rounded-full bg-ink text-white">Blog</a>
+        </nav>
+        <div class="relative shrink-0 ml-auto">
+          <button id="user-btn" class="w-9 h-9 rounded-full bg-blush-soft text-blush-dark font-semibold grid place-items-center" aria-label="Cont"></button>
+          <div id="user-menu" class="absolute right-0 mt-2 w-60 bg-paper border border-line rounded-xl shadow-card p-2 text-sm" hidden>
+            <div id="user-email" class="px-3 py-2 text-muted truncate"></div>
+            <button id="logout-btn" class="w-full text-left px-3 py-2 rounded-lg hover:bg-cream">Ieși din cont</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main id="view" class="max-w-6xl mx-auto px-4 py-6"></main>
+  </section>
+
+  <!-- ============ DIALOG generic ============ -->
+  <dialog id="prompt-dialog" class="p-0 rounded-2xl bg-paper w-[min(560px,94vw)] shadow-2xl">
+    <form method="dialog" class="p-6 space-y-4">
+      <h3 id="prompt-title" class="font-serif text-xl"></h3>
+      <div id="prompt-body"></div>
+      <div class="flex flex-row-reverse justify-start gap-2">
+        <button value="ok" id="prompt-ok" class="px-4 py-2 rounded-full text-sm bg-moss text-white">OK</button>
+        <button value="cancel" formnovalidate class="px-4 py-2 rounded-full text-sm hover:bg-cream">Anulează</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="fixed bottom-5 right-5 z-[60] space-y-2"></div>
+
+  <script type="module" src="js/blog.js"></script>
+</body>
+</html>
