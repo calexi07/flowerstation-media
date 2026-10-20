@@ -483,6 +483,39 @@ async function deletePhotos(ids) {
   render();
 }
 
+// Șterge din aplicație produse deja exportate, cu tot cu pozele lor (Shopify rămâne neatins)
+async function deleteExported(items) {
+  if (!items.length) return;
+  const n = items.length;
+  const ok = await ask({
+    title: `Ștergi ${n} ${n === 1 ? 'produs exportat' : 'produse exportate'} din aplicație?`, ok: 'Șterge', danger: true,
+    body: `<p class="text-sm text-muted">Fișele și pozele lor se șterg din aplicație, ca să faci loc. <b class="text-ink">În Shopify produsele rămân exact cum sunt</b>, cu poze cu tot. După ștergere nu le mai poți retrimite de aici.</p>`,
+  });
+  if (!ok) return;
+  const ids = items.map(p => p.id);
+  const assets = state.assets.filter(a => ids.includes(a.product_id));
+  const paths = assets.flatMap(a => [a.master_path, a.thumb_path]).filter(Boolean);
+  for (const a of assets) {
+    const { data: crops } = await store().list(`shopify/${a.id}`, { limit: 100 });
+    for (const c of crops || []) {
+      const { data: files } = await store().list(`shopify/${a.id}/${c.name}`, { limit: 100 });
+      (files || []).forEach(f => paths.push(`shopify/${a.id}/${c.name}/${f.name}`));
+    }
+  }
+  if (assets.length) {
+    const { error } = await sb.from('assets').delete().in('id', assets.map(a => a.id));
+    if (error) return toast('Nu am putut șterge pozele.', 'err');
+  }
+  const { error } = await sb.from('products').delete().in('id', ids);
+  if (error) return toast('Nu am putut șterge produsele.', 'err');
+  for (let i = 0; i < paths.length; i += 500) await store().remove(paths.slice(i, i + 500));
+  state.assets = state.assets.filter(a => !ids.includes(a.product_id));
+  state.products = state.products.filter(p => !ids.includes(p.id));
+  ids.forEach(id => state.exportSel.delete(id));
+  toast(`${n === 1 ? 'Produsul a fost șters' : n + ' produse au fost șterse'} din aplicație.`);
+  render();
+}
+
 // ---------------------------------------------------------------- salvare fișă
 const SAVE_FIELDS = ['title', 'handle', 'description', 'vendor', 'product_type', 'collection', 'tags', 'price',
   'compare_at_price', 'status', 'has_variants', 'option_name', 'variants', 'seo_title', 'seo_description'];
@@ -960,7 +993,9 @@ function historyHtml() {
   <div class="flex flex-wrap items-center gap-3 mb-4 max-w-3xl">
     <button data-act="new-batch" class="rounded-full px-4 py-2 text-sm border border-line hover:bg-paper">← Produse noi</button>
     <p class="text-sm text-muted">Produse exportate. Le poți modifica și exporta din nou.</p>
-    <div class="ml-auto flex items-center gap-2">
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      ${h.length ? `<button data-act="hist-all" class="text-sm text-muted hover:text-ink underline-offset-2 hover:underline">${nSel === h.length ? 'Deselectează tot' : 'Selectează tot'}</button>` : ''}
+      <button data-act="del-exported" ${nSel ? '' : 'disabled'} class="rounded-full border border-line px-4 py-2.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-40 disabled:hover:bg-transparent">🗑 Șterge (${nSel})</button>
       <button data-act="reexport" ${nSel ? '' : 'disabled'} class="rounded-full border border-line px-4 py-2.5 text-sm disabled:opacity-40">⬇ CSV (${nSel})</button>
       <button data-act="republish" ${nSel && state.shop.ok ? '' : 'disabled'} class="rounded-full bg-moss text-white px-5 py-2.5 text-sm font-medium disabled:opacity-40">🚀 Retrimite în Shopify (${nSel})</button>
     </div>
@@ -1032,6 +1067,12 @@ body.addEventListener('click', async e => {
       const items = history().filter(x => state.exportSel.has(x.id));
       state.exportSel.clear();
       return publishItems(items);
+    }
+    case 'del-exported': return deleteExported(history().filter(x => state.exportSel.has(x.id)));
+    case 'hist-all': {
+      const h = history(), all = h.every(x => state.exportSel.has(x.id));
+      h.forEach(x => all ? state.exportSel.delete(x.id) : state.exportSel.add(x.id));
+      return render();
     }
     case 'shop-retry': await checkShopify(true); return render();
     case 'redownload': return state.lastExport && saveBlob(state.lastExport.blob, state.lastExport.name);
