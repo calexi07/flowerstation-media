@@ -1247,6 +1247,18 @@ function csvRows(p, squares) {
   return rows;
 }
 
+/** Link provizoriu (produs-xxxx) sau gol → îl refacem din nume înainte de trimitere. */
+const isAutoHandle = h => !h || /^produs(-[a-z0-9]+)?(-\d+)?$/.test(h);
+async function fixHandles(items) {
+  for (const p of items) {
+    if (p.title?.trim() && isAutoHandle(p.handle)) {
+      p.handle = await uniqueHandle(p.title, p.id);
+      clearTimeout(state.saveTimers.get(p.id)); state.saveTimers.delete(p.id);
+      await saveProduct(p);
+    }
+  }
+}
+
 async function squaresFor(items, onStep) {
   const squares = {};
   const jobs = items.flatMap(p => productImages(p).map((a, i) => [p, a, i]));
@@ -1262,6 +1274,7 @@ async function doExport(items, btn) {
   items = items.filter(isComplete);
   if (!items.length) { toast('Nu e niciun produs complet de exportat.', 'err'); return null; }
   for (const p of items) await flushSave(p);
+  await fixHandles(items);
   const btnLabel = btn?.textContent;
   let squares;
   try {
@@ -1358,6 +1371,7 @@ async function publishItems(items) {
     const show = () => { const el = $(`[data-pub="${p.id}"]`); if (el) el.outerHTML = pubBadge(p); };
     st.status = 'busy'; st.msg = 'pregătesc pozele…'; show();
     await flushSave(p);
+    await fixHandles([p]);
     let squares;
     try {
       squares = await squaresFor([p], (k, n) => { st.msg = `pregătesc pozele ${k}/${n}…`; show(); });
