@@ -47,3 +47,5 @@ export const DEFAULT_VARIANTS = ['S', 'M', 'L'];
 // Autorul afișat pe articole și temele din planul de articole
 export const BLOG_AUTHOR = 'The Flower Station';
 export const BLOG_THEMES = ['Ocazii', 'Semnificații', 'Îngrijire', 'Local'];
+// Template-ul de articol din temă (shopify-theme/templates/article.tfs.json). Gol = template-ul temei.
+export const BLOG_TEMPLATE_SUFFIX = 'tfs';

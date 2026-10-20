@@ -10,6 +10,7 @@ const sb = createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const AUTHOR = CFG.BLOG_AUTHOR ?? 'The Flower Station';
 const THEMES = CFG.BLOG_THEMES ?? ['Ocazii', 'Semnificații', 'Îngrijire', 'Local'];
 const COLLECTIONS = CFG.SHOPIFY_COLLECTIONS ?? [];
+const TEMPLATE = CFG.BLOG_TEMPLATE_SUFFIX ?? '';
 
 // ---------------------------------------------------------------- helpers
 const $ = (s, el = document) => el.querySelector(s);
@@ -996,6 +997,7 @@ async function publish() {
     articleId: p.shopify_article_id, blogId: p.blog_id, title: p.title.trim(), handle: p.handle,
     bodyHtml: cleanBody(true), summaryHtml: p.summary?.trim() ? `<p>${esc(p.summary.trim())}</p>` : '',
     author: AUTHOR, tags: [p.theme].filter(Boolean), isPublished: !!p.publish_live,
+    templateSuffix: TEMPLATE || null,
     seoTitle: p.seo_title || p.title, seoDescription: p.seo_description,
     image: p.image_url ? { url: p.image_url, alt: p.image_alt || p.title } : null,
     imageKey: p.image_url || null, previousImageKey: p.shopify_image_key || null,
