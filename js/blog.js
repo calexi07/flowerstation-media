@@ -204,6 +204,7 @@ function route() {
   const m = location.hash.match(/^#post\/(.+)$/);
   const p = m && state.posts.find(x => x.id === m[1]);
   if (p) { state.view = 'edit'; state.cur = p; renderEditor(); }
+  else if (location.hash === '#google') { state.view = 'google'; state.cur = null; renderGoogle(); }
   else { state.view = 'plan'; state.cur = null; renderPlan(); }
   window.scrollTo(0, 0);
 }
@@ -245,7 +246,7 @@ function renderPlan() {
   const counts = { idea: 0, draft: 0, scheduled: 0, published: 0 };
   state.posts.forEach(p => { counts[p.status] = (counts[p.status] || 0) + 1; });
 
-  v.innerHTML = `
+  v.innerHTML = `${tabsHtml('plan')}
   <div class="flex flex-wrap items-end gap-3 mb-5">
     <div class="flex-[1_1_380px]">
       <h1 class="font-serif text-3xl tracking-tight mb-1">Planul de articole</h1>
@@ -302,6 +303,151 @@ $('#view').addEventListener('click', async e => {
   const row = t.closest('[data-open]');
   if (row) location.hash = `#post/${row.dataset.open}`;
 });
+
+const tabsHtml = cur => `<nav class="flex gap-1 mb-6 border-b border-line" aria-label="Blog">
+  ${[['plan', '#plan', 'Planul de articole'], ['google', '#google', 'Rezultate Google']].map(([k, h, l]) =>
+    `<a href="${h}" ${k === cur ? 'aria-current="page"' : ''} class="px-4 py-2.5 -mb-px text-sm border-b-2 ${k === cur ? 'border-ink text-ink font-semibold' : 'border-transparent text-muted hover:text-ink'}">${l}</a>`).join('')}</nav>`;
+
+// ================================================================ REZULTATE GOOGLE (Search Console)
+const fmtN = n => Math.round(n || 0).toLocaleString('ro-RO');
+const fmtPct = x => `${((x || 0) * 100).toFixed(1).replace('.', ',')}%`;
+const fmtPos = x => x ? String(x).replace('.', ',') : '–';
+const urlPath = u => { try { return new URL(u).pathname; } catch { return u; } };
+const postForUrl = u => { const path = urlPath(u).replace(/\/$/, ''); return state.posts.find(p => p.handle && path.endsWith('/' + p.handle) && path.includes('/blogs/')); };
+const titleFromUrl = u => { const h = urlPath(u).split('/').filter(Boolean).pop() || u; return h.replace(/-/g, ' ').replace(/^./, c => c.toUpperCase()); };
+
+/** Ce poți face cu un articol, după cifre. */
+function gscHint(r) {
+  if (r.position && r.position > 7 && r.position <= 20 && r.impressions >= 20)
+    return { cls: 'bg-[#F8E7D2] text-[#7A4510]', text: 'Aproape de prima pagină', tip: 'Apare pe pagina 1–2 din Google. Extinde articolul, adaugă poze și linkuri spre el din alte articole ca să urce.' };
+  if (r.position && r.position <= 7 && r.impressions >= 100 && r.ctr < 0.02)
+    return { cls: 'bg-blush-soft text-blush-dark', text: 'Titlu de îmbunătățit', tip: 'Mulți îl văd în Google, puțini dau click. Fă titlul și descrierea pentru Google mai atractive.' };
+  if (r.prev && r.prev.clicks >= 5 && r.clicks < r.prev.clicks * 0.7)
+    return { cls: 'bg-blush-soft text-blush-dark', text: 'În scădere', tip: 'Are mai puține click-uri decât în perioada anterioară. Merită actualizat.' };
+  if (r.clicks >= 10 && (!r.prev || r.clicks >= r.prev.clicks))
+    return { cls: 'bg-moss-soft text-moss-dark', text: 'Merge bine', tip: 'Adaugă linkuri spre el din articolele noi.' };
+  return null;
+}
+const trend = (cur, prev, lowerIsBetter = false) => {
+  if (!prev) return '';
+  const d = (cur - prev) / prev;
+  if (Math.abs(d) < 0.05) return '';
+  const good = lowerIsBetter ? d < 0 : d > 0;
+  return `<span class="ml-1 text-xs ${good ? 'text-moss' : 'text-blush-dark'}">${d > 0 ? '▲' : '▼'}${Math.abs(Math.round(d * 100))}%</span>`;
+};
+
+async function renderGoogle() {
+  const v = $('#view');
+  const days = state.gscDays || 28;
+  const g = state.gsc?.[days];
+  const tiles = t => [['Click-uri', fmtN(t.clicks)], ['Afișări în Google', fmtN(t.impressions)], ['Rata de click', fmtPct(t.ctr)], ['Poziția medie', fmtPos(t.position)]]
+    .map(([l, val]) => `<div class="bg-paper border border-line rounded-2xl p-4"><p class="text-xs text-muted mb-1">${l}</p><p class="font-serif text-2xl">${val}</p></div>`).join('');
+  v.innerHTML = `${tabsHtml('google')}
+  <div class="flex flex-wrap items-end gap-3 mb-5">
+    <div class="flex-[1_1_380px]">
+      <h1 class="font-serif text-3xl tracking-tight mb-1">Rezultate Google</h1>
+      <p class="text-sm text-muted max-w-2xl">Cum apar articolele blogului în căutările Google: de câte ori au fost văzute, câte click-uri au primit și pe ce poziție apar. Datele vin din Google Search Console, cu 2–3 zile întârziere.</p>
+    </div>
+    <label class="text-sm">Perioada
+      <select id="gsc-days" class="ml-2 rounded-lg border border-line bg-paper px-3 py-2 text-sm">
+        ${[[7, 'ultimele 7 zile'], [28, 'ultimele 28 de zile'], [90, 'ultimele 3 luni'], [180, 'ultimele 6 luni']].map(([d, l]) => `<option value="${d}" ${d === days ? 'selected' : ''}>${l}</option>`).join('')}
+      </select></label>
+  </div>
+  <div id="gsc-body">${g ? '' : `<p class="text-sm text-muted">${spinner} Aduc datele din Google…</p>`}</div>`;
+  if (!g) {
+    const r = await callFn('gsc', { action: 'pages', days });
+    if (state.view !== 'google') return;
+    if (!r.ok) {
+      $('#gsc-body').innerHTML = `<div class="max-w-2xl bg-paper border border-line rounded-2xl p-6">
+        <h2 class="font-serif text-xl mb-2">Search Console nu e conectat încă</h2>
+        <p class="text-sm text-blush-dark mb-3">${esc(r.error || 'Eroare necunoscută')}</p>
+        <p class="text-sm text-muted">După ce faci pașii de conectare, reîncarcă pagina.</p></div>`;
+      return;
+    }
+    state.gsc = { ...(state.gsc || {}), [days]: r };
+    return renderGoogle();
+  }
+  const rows = [...g.pages].sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions);
+  const published = state.posts.filter(p => p.status === 'published' && p.handle);
+  const missing = published.filter(p => !rows.some(r => postForUrl(r.url) === p));
+  $('#gsc-body').innerHTML = `
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">${tiles(g.total)}</div>
+    ${rows.length ? `<div class="bg-paper border border-line rounded-2xl overflow-x-auto">
+      <table class="w-full min-w-[820px] text-sm">
+        <thead><tr class="text-left text-xs text-muted">
+          <th class="px-4 py-3 font-semibold w-[42%]">Articol</th><th class="px-3 py-3 font-semibold text-right">Click-uri</th>
+          <th class="px-3 py-3 font-semibold text-right">Afișări</th><th class="px-3 py-3 font-semibold text-right">Rata de click</th>
+          <th class="px-3 py-3 font-semibold text-right">Poziția</th><th class="px-4 py-3 font-semibold">Ce poți face</th></tr></thead>
+        <tbody>${rows.map((r, i) => { const p = postForUrl(r.url), h = gscHint(r); return `
+          <tr class="border-t border-line hover:bg-cream/60 cursor-pointer" data-gsc="${i}">
+            <td class="px-4 py-3"><span class="font-medium">${esc(p?.title || titleFromUrl(r.url))}</span>
+              <span class="block text-xs text-muted truncate max-w-[420px]">${esc(urlPath(r.url))}</span></td>
+            <td class="px-3 py-3 text-right whitespace-nowrap">${fmtN(r.clicks)}${trend(r.clicks, r.prev?.clicks)}</td>
+            <td class="px-3 py-3 text-right whitespace-nowrap">${fmtN(r.impressions)}${trend(r.impressions, r.prev?.impressions)}</td>
+            <td class="px-3 py-3 text-right">${fmtPct(r.ctr)}</td>
+            <td class="px-3 py-3 text-right whitespace-nowrap">${fmtPos(r.position)}${trend(r.position, r.prev?.position, true)}</td>
+            <td class="px-4 py-3">${h ? `<span class="px-2.5 py-1 rounded-full text-xs font-semibold ${h.cls}" title="${esc(h.tip)}">${h.text}</span>` : ''}</td>
+          </tr>
+          <tr hidden data-gsc-detail="${i}"><td colspan="6" class="px-4 pb-4"></td></tr>`; }).join('')}</tbody>
+      </table></div>`
+    : `<div class="bg-paper border border-line rounded-2xl p-8 text-center"><p class="font-serif text-xl mb-1">Încă nu sunt date pentru blog</p>
+        <p class="text-sm text-muted">Google are nevoie de câteva zile sau săptămâni ca să găsească articolele noi. Revino după ce ai publicat câteva.</p></div>`}
+    ${missing.length ? `<p class="text-xs text-muted mt-4">Fără date încă (prea noi sau negăsite de Google): ${missing.map(p => esc(p.title)).join(' · ')}</p>` : ''}
+    <p class="text-xs text-muted mt-2">Perioada: ${esc(g.range.startDate)} – ${esc(g.range.endDate)}, comparat cu cele ${g.days} zile dinainte. Click pe un rând pentru căutările care îl aduc.</p>`;
+}
+
+function queriesHtml(d) {
+  if (!d.queries?.length) return '<p class="text-sm text-muted py-2">Google nu arată încă după ce căutări apare (puține afișări).</p>';
+  return `<div class="bg-cream rounded-xl p-3"><p class="text-xs text-muted mb-2">Căutările din Google care au afișat articolul</p>
+    <table class="w-full text-sm"><thead><tr class="text-left text-xs text-muted"><th class="py-1 font-semibold">Căutare</th><th class="py-1 font-semibold text-right">Click-uri</th><th class="py-1 font-semibold text-right">Afișări</th><th class="py-1 font-semibold text-right">Poziția</th></tr></thead>
+    <tbody>${d.queries.slice(0, 15).map(q => `<tr class="border-t border-line/70"><td class="py-1.5">${esc(q.query)}</td><td class="py-1.5 text-right">${fmtN(q.clicks)}</td><td class="py-1.5 text-right">${fmtN(q.impressions)}</td><td class="py-1.5 text-right">${fmtPos(q.position)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+$('#view').addEventListener('change', e => {
+  if (state.view !== 'google' || e.target.id !== 'gsc-days') return;
+  state.gscDays = Number(e.target.value);
+  renderGoogle();
+});
+$('#view').addEventListener('click', async e => {
+  if (state.view !== 'google') return;
+  const row = e.target.closest('[data-gsc]');
+  if (!row) return;
+  const i = row.dataset.gsc, det = $(`[data-gsc-detail="${i}"]`);
+  if (!det.hidden) { det.hidden = true; return; }
+  det.hidden = false;
+  const g = state.gsc[state.gscDays || 28];
+  const r = [...g.pages].sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions)[Number(i)];
+  const p = postForUrl(r.url), h = gscHint(r);
+  const cell = det.firstElementChild;
+  const head = `${h ? `<p class="text-sm mb-2"><b>${h.text}:</b> ${esc(h.tip)}</p>` : ''}${p ? `<a href="#post/${p.id}" class="inline-block text-sm text-moss font-semibold hover:underline mb-2">Deschide articolul în editor →</a>` : ''}`;
+  cell.innerHTML = head + `<p class="text-sm text-muted">${spinner} Aduc căutările…</p>`;
+  r._q ??= await callFn('gsc', { action: 'page', url: r.url, days: state.gscDays || 28 });
+  cell.innerHTML = head + (r._q.ok ? queriesHtml(r._q) : `<p class="text-sm text-blush-dark">${esc(r._q.error)}</p>`);
+});
+
+/** Panoul din editor: cum merge articolul în Google. */
+async function loadPostGsc() {
+  const p = state.cur, box = $('#gsc-box');
+  if (!box) return;
+  if (!p.shopify_url || p.status !== 'published') { box.hidden = true; return; }
+  box.hidden = false;
+  box.innerHTML = `<h2 class="font-semibold mb-2">În Google (28 de zile)</h2><p class="text-sm text-muted">${spinner} Aduc datele…</p>`;
+  let pageUrl = p.shopify_url;
+  const all = state.gsc?.[28]?.pages?.find(r => postForUrl(r.url) === p);
+  if (all) pageUrl = all.url;
+  const r = await callFn('gsc', { action: 'page', url: pageUrl, days: 28 });
+  if (state.cur !== p || !$('#gsc-box')) return;
+  if (!r.ok) { box.innerHTML = `<h2 class="font-semibold mb-1">În Google</h2><p class="text-xs text-muted">${/GSC_|Search Console|cont de serviciu/i.test(r.error || '') ? 'Conectează Google Search Console ca să vezi aici cum merge articolul.' : esc(r.error)}</p>`; return; }
+  const t = r.total || { clicks: 0, impressions: 0 };
+  box.innerHTML = `<h2 class="font-semibold mb-3">În Google (28 de zile)</h2>
+    <div class="grid grid-cols-2 gap-2 mb-3">
+      <div class="rounded-xl bg-cream p-3"><p class="text-xs text-muted">Click-uri</p><p class="font-serif text-xl">${fmtN(t.clicks)}</p></div>
+      <div class="rounded-xl bg-cream p-3"><p class="text-xs text-muted">Afișări</p><p class="font-serif text-xl">${fmtN(t.impressions)}</p></div>
+      ${t.position ? `<div class="rounded-xl bg-cream p-3 col-span-2 flex justify-between text-sm"><span class="text-muted">Poziția medie</span><span class="font-semibold">${fmtPos(t.position)}</span></div>` : ''}
+    </div>
+    ${r.queries.length ? `<p class="text-xs text-muted mb-1">Căutările care îl aduc</p><ul class="text-sm space-y-1">${r.queries.slice(0, 6).map(q => `<li class="flex justify-between gap-2"><span class="truncate">${esc(q.query)}</span><span class="text-muted whitespace-nowrap">poz. ${fmtPos(q.position)}</span></li>`).join('')}</ul>`
+      : '<p class="text-xs text-muted">Încă nu sunt date — Google are nevoie de câteva zile sau săptămâni pentru articolele noi.</p>'}`;
+}
 
 const field = (label, inner) => `<label class="block"><span class="text-sm font-medium">${label}</span>${inner}</label>`;
 const inputCls = 'mt-1 w-full rounded-lg border border-line bg-paper px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-moss/30';
@@ -614,6 +760,7 @@ function renderEditor() {
         <label class="block"><span class="text-xs font-medium">Rezumat (apare în lista de articole a blogului)</span>
           <textarea id="f-summary" rows="2" class="${inputCls}">${esc(p.summary)}</textarea></label>
       </section>
+      <section id="gsc-box" class="bg-paper border border-line rounded-2xl p-5" hidden></section>
       <section id="img-box" class="bg-paper border border-line rounded-2xl p-5"></section>
       <section id="pub-box" class="bg-paper border border-line rounded-2xl p-5"></section>
     </aside>
@@ -624,6 +771,7 @@ function renderEditor() {
   $('#img-box').innerHTML = imgHtml();
   updateSide();
   loadCatalog();
+  loadPostGsc();
 }
 
 function renderGenBtn() {
