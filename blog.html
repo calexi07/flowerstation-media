@@ -47,6 +47,12 @@
     .prose-ed a { color: #2F5D4A; text-decoration: underline; }
     .prose-ed .tfs-produs { user-select: none; cursor: default; position: relative; }
     .prose-ed .tfs-produs:hover { outline: 2px solid #E8B7A8; outline-offset: 2px; }
+    .prose-ed .tfs-loc-poza { margin: 24px 0; padding: 28px 20px; border: 2px dashed #B9B0A2; border-radius: 14px; background: #FAF7F2; color: #6B7069; text-align: center; font-size: 14px; cursor: pointer; user-select: none; }
+    .prose-ed .tfs-loc-poza::before { content: '＋ '; font-weight: 700; color: #2F5D4A; }
+    .prose-ed .tfs-loc-poza:hover { border-color: #2F5D4A; color: #1F2A24; }
+    .prose-ed figure { cursor: pointer; user-select: none; position: relative; }
+    .prose-ed figure:hover { outline: 2px solid #2F5D4A; outline-offset: 3px; border-radius: 12px; }
+    .prose-ed figure:hover::after { content: 'click pentru detalii'; position: absolute; top: 8px; right: 8px; font-size: 11px; background: #2F5D4A; color: #fff; padding: 1px 8px; border-radius: 999px; }
     .prose-ed .tfs-produs:hover::after { content: 'click pentru a-l scoate'; position: absolute; top: -10px; right: 10px; font-size: 11px; background: #B9705C; color: #fff; padding: 1px 8px; border-radius: 999px; }
   </style>
 </head>
