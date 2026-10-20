@@ -17,8 +17,8 @@ export const SQUARE_MAX = 2048;
 // ---------------- Shopify — modifică aici când schimbi ceva în magazin ----------------
 export const SHOPIFY_VENDOR = 'The Flower Station';
 
-// Template-ul paginii de produs (template-tfs → „tfs”). Se setează automat la publicare.
-export const SHOPIFY_TEMPLATE_SUFFIX = 'tfs';
+// Template-ul paginii de produs, exact cum apare în Shopify la „Theme template”. Se setează automat la publicare.
+export const SHOPIFY_TEMPLATE_SUFFIX = 'template-tfs';
 
 // Tipuri de produs (Products → Product organization → Type)
 export const SHOPIFY_TYPES = [
