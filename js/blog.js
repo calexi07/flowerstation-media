@@ -57,13 +57,18 @@ function toast(msg, type = 'ok') {
   setTimeout(() => el.remove(), t + 400);
 }
 
-function ask({ title, body = '', ok = 'OK', danger = false, collect = () => true, onOpen, hideOk = false }) {
+function ask({ title, body = '', ok = 'OK', danger = false, collect = () => true, onOpen, hideOk = false, cancel = 'Anulează' }) {
   const dlg = $('#prompt-dialog');
   $('#prompt-title').textContent = title;
-  $('#prompt-body').innerHTML = body;
+  // element nou la fiecare deschidere, ca să nu rămână ascultători de la dialogurile anterioare
+  const prev = $('#prompt-body'), fresh = prev.cloneNode(false);
+  prev.replaceWith(fresh);
+  fresh.innerHTML = body;
   const okBtn = $('#prompt-ok');
   okBtn.textContent = ok;
   okBtn.hidden = hideOk;
+  const cancelBtn = dlg.querySelector('button[value=cancel]');
+  if (cancelBtn) cancelBtn.textContent = cancel;
   okBtn.className = `px-4 py-2 rounded-full text-sm text-white ${danger ? 'bg-blush-dark' : 'bg-moss'}`;
   dlg.returnValue = '';
   dlg.showModal();
@@ -153,6 +158,8 @@ async function loadPosts() {
   if (!state.missingTable) {
     const probe = await sb.from('blog_posts').select('scheduled_at').limit(1);
     state.canSchedule = !probe.error;
+    const probe2 = await sb.from('blog_posts').select('faq,show_toc').limit(1);
+    state.canFaq = !probe2.error;
   }
   // articolele programate a căror oră a trecut sunt acum publicate
   for (const p of state.posts) if (p.status === 'scheduled' && p.scheduled_at && new Date(p.scheduled_at) <= new Date()) p.status = 'published';
@@ -161,12 +168,13 @@ async function loadPosts() {
 const SAVE_FIELDS = ['title', 'keyword', 'theme', 'month', 'collection', 'status', 'notes', 'body_html', 'summary', 'handle',
   'seo_title', 'seo_description', 'products', 'link_collection', 'image_url', 'image_alt', 'publish_live', 'blog_id',
   'shopify_article_id', 'shopify_admin_url', 'shopify_url', 'shopify_image_key', 'published_at'];
-const saveFields = () => state.canSchedule ? [...SAVE_FIELDS, 'scheduled_at'] : SAVE_FIELDS;
+const saveFields = () => [...SAVE_FIELDS, ...(state.canSchedule ? ['scheduled_at'] : []), ...(state.canFaq ? ['faq', 'show_toc'] : [])];
 
 async function savePost(p) {
   const row = Object.fromEntries(saveFields().map(k => [k, p[k] ?? null]));
   for (const k of ['title', 'keyword', 'body_html', 'summary', 'handle', 'seo_title', 'seo_description', 'image_alt']) row[k] ??= '';
   row.products ??= [];
+  if ('faq' in row) { row.faq = (row.faq || []).filter(f => f && (f.q || f.a)); row.show_toc = row.show_toc !== false; }
   row.publish_live = !!row.publish_live;
   row.theme ||= BASE_THEMES[0];
   row.status ||= 'idea';
@@ -515,13 +523,18 @@ async function deletePost(p) {
 }
 
 // ================================================================ EDITORUL
+const lei2 = v => `${Number(v).toFixed(2).replace('.', ',')} lei`;
+/** Cardul de produs din articol, în stilul site-ului (colțuri drepte, preț bold, buton „Adaugă în coș”). */
 function productCard(p) {
   const url = `/products/${p.handle}`;
-  return `<div class="tfs-produs" data-handle="${esc(p.handle)}" contenteditable="false" style="display:flex;gap:16px;align-items:center;padding:14px;border:1px solid #E9E2D8;border-radius:14px;margin:24px 0;">`
-    + (p.image ? `<a href="${url}" style="flex:none;"><img src="${esc(sizedImg(p.image, 240))}" alt="${esc(p.title)}" width="96" height="96" style="width:96px;height:96px;object-fit:cover;border-radius:10px;display:block;margin:0;"></a>` : '')
-    + `<div style="flex:1;min-width:0;"><p style="margin:0 0 4px;font-weight:600;"><a href="${url}" style="text-decoration:none;color:inherit;">${esc(p.title)}</a></p>`
-    + (p.price ? `<p style="margin:0 0 10px;opacity:.75;">de la ${esc(fmtLei(p.price))}</p>` : '')
-    + `<a href="${url}" style="display:inline-block;padding:8px 18px;border-radius:999px;background:#1F2A24;color:#ffffff;text-decoration:none;font-size:14px;">Vezi produsul</a></div></div>`;
+  const buy = p.variantId ? `/cart/add?id=${encodeURIComponent(p.variantId)}&quantity=1` : url;
+  return `<div class="tfs-produs" data-handle="${esc(p.handle)}" contenteditable="false" style="display:flex;gap:20px;align-items:center;margin:28px 0;padding:16px;border:1px solid #e5e5e5;background:#fff;">`
+    + (p.image ? `<a class="tfs-produs__img" href="${url}" style="flex:none;display:block;width:140px;"><img src="${esc(sizedImg(p.image, 400))}" alt="${esc(p.title)}" width="140" height="140" loading="lazy" style="width:140px;height:140px;object-fit:cover;display:block;margin:0;"></a>` : '')
+    + `<div class="tfs-produs__info" style="flex:1;min-width:0;">`
+    + `<p class="tfs-produs__title" style="margin:0 0 6px;font-size:15px;line-height:1.4;"><a href="${url}" style="color:inherit;text-decoration:none;">${esc(p.title)}</a></p>`
+    + (p.price ? `<p class="tfs-produs__price" style="margin:0 0 14px;font-size:15px;">${p.priceVaries ? '<span style="color:#8a8a8a;font-size:13px;">De la</span> ' : ''}<strong>${esc(lei2(p.price))}</strong></p>` : '')
+    + `<a class="tfs-produs__btn" href="${buy}" style="display:inline-block;padding:11px 22px;border:1px solid #1f1f1f;color:#1f1f1f;background:#fff;text-decoration:none;font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;">${p.variantId ? 'Adaugă în coș' : 'Alege varianta'}</a>`
+    + `</div></div>`;
 }
 
 const ALLOWED = new Set(['H2', 'H3', 'P', 'UL', 'OL', 'LI', 'STRONG', 'EM', 'B', 'I', 'A', 'BR', 'BLOCKQUOTE']);
@@ -593,7 +606,9 @@ function seoChecks() {
   const h2 = ed ? ed.querySelectorAll('h2').length : 0;
   const words = wordCount();
   const links = ed ? ed.querySelectorAll('.tfs-produs').length
-    + [...ed.querySelectorAll('a[href*="/products/"], a[href*="/collections/"]')].filter(a => !a.closest('.tfs-produs')).length : 0;
+    + [...ed.querySelectorAll('a[href^="/"]')].filter(a => !a.closest('.tfs-produs')).length : 0;
+  const textLinks = ed ? [...ed.querySelectorAll('a[href^="/"]')].filter(a => !a.closest('.tfs-produs')).length : 0;
+  const faqN = (p.faq || []).filter(f => f.q?.trim() && f.a?.trim()).length;
   const lvl = (ok, warn) => ok ? 'ok' : warn ? 'warn' : 'bad';
   return [
     { s: !kw ? 'bad' : lvl(hasAllWords(p.title, kw)), label: 'Expresia în titlu', hint: !kw ? 'completează expresia căutată' : hasAllWords(p.title, kw) ? 'da' : `adaugă „${kw}” în titlu` },
@@ -603,6 +618,8 @@ function seoChecks() {
     { s: lvl(h2 >= 3, h2 >= 1), label: 'Cel puțin 3 subtitluri (H2)', hint: `${h2} ${h2 === 1 ? 'subtitlu' : 'subtitluri'}` },
     { s: lvl(words >= 800, words >= 500), label: 'Minim 800 de cuvinte', hint: `${words} cuvinte` },
     { s: lvl(links >= 1, false), label: 'Link spre produse sau colecții', hint: links ? `${links} ${links === 1 ? 'link' : 'linkuri'}` : 'adaugă un produs din magazin' },
+    { s: lvl(textLinks >= 3, textLinks >= 1), label: 'Cel puțin 3 linkuri interne în text', hint: textLinks ? `${textLinks} — butonul „Linkuri automate” adaugă altele` : 'apasă „Linkuri automate” în bara editorului' },
+    ...(state.canFaq ? [{ s: lvl(faqN >= 4, faqN >= 2), label: 'Întrebări frecvente (4–6)', hint: faqN ? `${faqN} întrebări` : 'generează-le sub text' }] : []),
     (() => { const imgs = ed ? [...ed.querySelectorAll('figure img')] : []; const noAlt = imgs.filter(i => !i.alt.trim()).length;
       return { s: lvl(imgs.length >= 2 && !noAlt, imgs.length >= 1), label: 'Cel puțin 2 poze în text', hint: imgs.length ? `${imgs.length} ${imgs.length === 1 ? 'poză' : 'poze'}${noAlt ? `, ${noAlt} fără text alternativ` : ''}` : (ed?.querySelector('.tfs-loc-poza') ? 'completează locurile marcate' : 'butonul „Poză” din bara editorului') }; })(),
     { s: lvl(p.image_url && p.image_alt?.trim(), p.image_url), label: 'Poză principală cu text alternativ', hint: !p.image_url ? 'alege poza' : p.image_alt?.trim() ? 'da' : 'scrie textul alternativ' },
@@ -739,11 +756,13 @@ function renderEditor() {
           ${tb('bold', 'B', 'font-bold')}${tb('italic', 'I', 'italic font-serif')}${tb('ul', '• Listă')}${tb('ol', '1. Listă')}${tb('link', 'Link')}
           <span class="w-px h-6 bg-line mx-1"></span>
           <button type="button" data-act="insert-img" class="min-h-[40px] px-3 rounded-lg border border-line bg-paper text-sm font-semibold hover:bg-cream">+ Poză</button>
+          <button type="button" data-act="auto-links" class="min-h-[40px] px-3 rounded-lg border border-line bg-paper text-sm font-semibold hover:bg-cream" title="AI-ul pune linkuri spre colecții, produse și alte articole">🔗 Linkuri automate</button>
           <button type="button" data-act="insert-prod" class="min-h-[40px] px-3 rounded-lg border border-moss/30 bg-moss-soft text-moss-dark text-sm font-semibold">+ Produs din magazin</button>
           <span id="words" class="ml-auto text-xs text-muted"></span>
         </div>
         <div id="ed" class="prose-ed px-6 sm:px-10 py-8" contenteditable="true" spellcheck="true" data-placeholder="Scrie aici articolul sau apasă „Generează ciornă”. Titlul de mai sus apare separat, ca titlu principal."></div>
       </section>
+      <section id="faq-box" class="bg-paper border border-line rounded-2xl p-5"></section>
     </div>
 
     <aside class="flex-[1_1_340px] min-w-0 space-y-4">
@@ -761,6 +780,7 @@ function renderEditor() {
           <textarea id="f-summary" rows="2" class="${inputCls}">${esc(p.summary)}</textarea></label>
       </section>
       <section id="gsc-box" class="bg-paper border border-line rounded-2xl p-5" hidden></section>
+      <section id="social-box" class="bg-paper border border-line rounded-2xl p-5"></section>
       <section id="img-box" class="bg-paper border border-line rounded-2xl p-5"></section>
       <section id="pub-box" class="bg-paper border border-line rounded-2xl p-5"></section>
     </aside>
@@ -769,9 +789,11 @@ function renderEditor() {
   $$('#ed .tfs-produs, #ed .tfs-loc-poza, #ed figure').forEach(x => x.setAttribute('contenteditable', 'false'));
   renderGenBtn();
   $('#img-box').innerHTML = imgHtml();
+  renderFaq();
   updateSide();
   loadCatalog();
   loadPostGsc();
+  socialStatus().then(renderSocialBox);
 }
 
 function renderGenBtn() {
@@ -834,6 +856,11 @@ $('#view').addEventListener('input', e => {
       p.handle = slugify(p.title); $('#f-handle').value = p.handle;
     }
     if (id === 'f-title') p._prevTitle = p.title;
+  } else if (e.target.dataset.faqQ !== undefined || e.target.dataset.faqA !== undefined) {
+    const i = Number(e.target.dataset.faqQ ?? e.target.dataset.faqA), k = e.target.dataset.faqQ !== undefined ? 'q' : 'a';
+    p.faq = [...(p.faq || [])]; p.faq[i] = { ...p.faq[i], [k]: e.target.value };
+  } else if (id === 'f-toc') {
+    p.show_toc = e.target.checked;
   } else if (id === 'f-handle') {
     p.handle = slugify(e.target.value);
   } else if (e.target.closest('#ed')) {
@@ -911,8 +938,21 @@ $('#view').addEventListener('click', async e => {
   if (act === 'find-prod') { const pr = await findProduct('Produse de recomandat'); if (pr) addProduct(pr); return; }
   if (act === 'insert-prod') return insertProduct();
   if (act === 'insert-img') return insertImage();
+  if (act === 'auto-links') return autoLinks();
+  if (act === 'faq-add') { p.faq = [...(p.faq || []), { q: '', a: '' }]; renderFaq(); queueSave(); updateSide(); $$('#faq-box [data-faq-q]').pop()?.focus(); return; }
+  if (act === 'faq-ai') return aiFaq();
+  const fdel = t.closest('[data-faq-del]');
+  if (fdel) { p.faq = (p.faq || []).filter((_, i) => i !== Number(fdel.dataset.faqDel)); renderFaq(); queueSave(); updateSide(); return; }
   if (act === 'pick-img') return pickImage();
   if (act === 'generate') return generate();
+  if (act === 'social-disconnect') {
+    if (await ask({ title: 'Deconectezi Facebook?', ok: 'Deconectează', danger: true, body: '<p class="text-sm text-muted">Tool-ul nu va mai putea publica până nu conectezi din nou pagina.</p>' })) {
+      const r = await callFn('social', { action: 'disconnect' }); if (r.ok) state.social = r; renderSocialBox();
+    }
+    return;
+  }
+  const soc = t.closest('[data-social]')?.dataset.social;
+  if (soc) return openSocial(soc);
   if (act === 'publish') return publish();
   if (act === 'retry-cat') return loadCatalog(true);
 });
@@ -949,7 +989,7 @@ async function runCmd(cmd) {
 function addProduct(pr) {
   const p = state.cur;
   p.products = p.products || [];
-  if (!p.products.some(x => x.handle === pr.handle)) p.products.push({ title: pr.title, handle: pr.handle, image: pr.image, price: pr.price });
+  if (!p.products.some(x => x.handle === pr.handle)) p.products.push({ title: pr.title, handle: pr.handle, image: pr.image, price: pr.price, priceVaries: !!pr.priceVaries, variantId: pr.variantId || null });
   $('#prod-chips').innerHTML = chipsHtml();
   queueSave();
 }
@@ -1125,6 +1165,328 @@ async function editFigure(fig) {
   queueSave(); updateSide();
 }
 
+// ---------------------------------------------------------------- Facebook / Instagram
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+/** Poza decupată la dimensiunea rețelei (umple tot cadrul), ca JPEG. */
+async function cropBlob(url, w, h) {
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  img.src = sizedImg(url, 2000);
+  await img.decode();
+  const c = Object.assign(document.createElement('canvas'), { width: w, height: h });
+  const k = Math.max(w / img.naturalWidth, h / img.naturalHeight);
+  const dw = img.naturalWidth * k, dh = img.naturalHeight * k;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('Nu am putut pregăti poza.')), 'image/jpeg', 0.9));
+}
+const utm = (url, source, handle) => url ? `${url}${url.includes('?') ? '&' : '?'}utm_source=${source}&utm_medium=social&utm_campaign=blog-${handle || 'articol'}` : '';
+const NET = {
+  facebook: { name: 'Facebook', formats: [['1200x630', 'Orizontal'], ['1080x1080', 'Pătrat'], ['1080x1350', 'Portret']], color: '#1877F2',
+    icon: '<svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M14 8h3V4h-3c-2.8 0-5 2.2-5 5v2H6v4h3v7h4v-7h3l1-4h-4V9c0-.6.4-1 1-1z"/></svg>' },
+  instagram: { name: 'Instagram', formats: [['1080x1350', 'Portret 4:5'], ['1080x1080', 'Pătrat']], color: '#C13584',
+    icon: '<svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor"/></svg>' },
+};
+
+async function socialStatus(force = false) {
+  if (state.social && !force) return state.social;
+  const r = await callFn('social', { action: 'status' });
+  state.social = r.ok ? r : { ok: false, error: r.error };
+  return state.social;
+}
+
+async function renderSocialBox() {
+  const box = $('#social-box'), p = state.cur;
+  if (!box) return;
+  const st = state.social;
+  const { data: hist } = await sb.from('social_posts').select('*').eq('post_id', p.id).order('created_at', { ascending: false });
+  if (state.cur !== p || !$('#social-box')) return;
+  const btn = n => `<button data-social="${n}" class="flex-1 min-h-[44px] rounded-full text-white text-sm font-semibold inline-flex items-center justify-center gap-2 hover:opacity-90" style="background:${NET[n].color}">${NET[n].icon} ${NET[n].name}</button>`;
+  box.innerHTML = `<h2 class="font-semibold mb-1">Publică pe rețele</h2>
+    <p class="text-xs text-muted mb-3">AI-ul scrie postarea din articol; tu o verifici, alegi poza și publici direct.</p>
+    <div class="flex gap-2">${btn('facebook')}${btn('instagram')}</div>
+    <p class="text-xs text-muted mt-2">${st?.connected ? `Conectat: ${esc(st.page)}${st.instagram ? ` · @${esc(st.instagram)}` : ' · Instagram nelegat'} · <button data-act="social-disconnect" class="underline hover:text-ink">deconectează</button>` : st ? 'Facebook nu e conectat încă — te ghidez la primul click.' : ''}</p>
+    ${(hist || []).length ? `<ul class="mt-3 space-y-1 text-sm">${hist.map(h => `<li class="flex justify-between gap-2"><span>${NET[h.network]?.name || h.network} · ${esc(fmtWhen(h.created_at))}</span>${h.url ? `<a href="${esc(h.url)}" target="_blank" rel="noopener" class="text-moss font-medium hover:underline">Vezi ↗</a>` : ''}</li>`).join('')}</ul>` : ''}`;
+}
+
+/** Conectarea paginii de Facebook (o singură dată). Întoarce true dacă e conectată. */
+async function connectSocial() {
+  const st = await socialStatus(true);
+  if (!st.ok) { toast(st.error || 'Funcția „social” nu răspunde.', 'err'); return false; }
+  if (st.connected) return true;
+  let done = false;
+  await ask({
+    title: 'Conectează pagina de Facebook', ok: '', hideOk: true, cancel: 'Închide',
+    body: `<div class="space-y-3 text-sm">
+      ${!st.appReady ? '<p class="p-2.5 rounded-lg bg-blush-soft text-blush-dark">Mai întâi pune secretele META_APP_ID și META_APP_SECRET în Supabase (pașii sunt în mesajul din chat).</p>' : ''}
+      <ol class="list-decimal pl-5 space-y-1 text-muted">
+        <li>Deschide <a class="text-moss underline" href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener">Graph API Explorer</a>.</li>
+        <li>În dreapta, la <b>Meta App</b>, alege aplicația ta.</li>
+        <li>La <b>User or Page</b> alege <b>Get User Access Token</b> și bifează permisiunile: <code class="text-xs">pages_show_list, pages_read_engagement, pages_manage_posts, instagram_basic, instagram_content_publish, business_management</code>.</li>
+        <li><b>Generate Access Token</b> → acceptă → copiază tokenul și lipește-l aici.</li>
+      </ol>
+      <textarea id="so-token" rows="3" class="${inputCls}" placeholder="EAAB…"></textarea>
+      <div id="so-pages"></div>
+      <p id="so-msg" class="text-sm"></p>
+      <button type="button" data-connect class="w-full min-h-[44px] rounded-full bg-ink text-white font-semibold">Conectează</button>
+      <p class="text-xs text-muted">Tokenul se păstrează doar pe server; tool-ul îl transformă într-unul de lungă durată pentru pagină.</p></div>`,
+    onOpen: (b, dlg) => b.addEventListener('click', async e => {
+      if (!e.target.closest('[data-connect]')) return;
+      const btn = e.target.closest('[data-connect]'), msg = $('#so-msg', b);
+      const pageId = $('input[name=so-page]:checked', b)?.value;
+      btn.disabled = true; btn.innerHTML = `${spinner} Mă conectez…`; msg.textContent = '';
+      const r = await callFn('social', { action: 'connect', token: $('#so-token', b).value, pageId });
+      btn.disabled = false; btn.textContent = 'Conectează';
+      if (!r.ok) { msg.className = 'text-sm text-blush-dark'; msg.textContent = r.error; return; }
+      if (r.choose) {
+        $('#so-pages', b).innerHTML = `<p class="font-medium mb-1">Alege pagina:</p>${r.choose.map((x, i) => `<label class="flex gap-2 items-center p-2 rounded-lg border border-line mb-1"><input type="radio" name="so-page" value="${esc(x.id)}" ${i ? '' : 'checked'} /> ${esc(x.name)}${x.instagram ? ` <span class="text-muted">· @${esc(x.instagram)}</span>` : ''}</label>`).join('')}`;
+        msg.className = 'text-sm text-muted'; msg.textContent = 'Alege pagina și apasă din nou „Conectează”.';
+        return;
+      }
+      state.social = r; done = true;
+      if (r.warning) toast(r.warning, 'err');
+      toast(`Conectat la ${r.page}${r.instagram ? ' și @' + r.instagram : ''}.`);
+      dlg.close();
+    }),
+  });
+  renderSocialBox();
+  return done;
+}
+
+async function socialTexts(force = false) {
+  const p = state.cur;
+  if (p._social && !force) return p._social;
+  const ed = $('#ed').cloneNode(true);
+  $$('.tfs-produs, .tfs-loc-poza, figure', ed).forEach(x => x.remove());
+  const r = await callFn('blog-ai', { action: 'social', post: { title: p.title, keyword: p.keyword, summary: p.summary, text: ed.innerText } });
+  if (!r.ok) throw new Error(r.error || 'AI-ul nu a răspuns.');
+  p._social = r;
+  return r;
+}
+function socialText(network) {
+  const p = state.cur, s = p._social;
+  if (network === 'facebook') {
+    const link = utm(p.shopify_url, 'facebook', p.handle);
+    return `${s.facebook.trim()}${link ? `\n\n👉 Citește articolul: ${link}` : ''}`;
+  }
+  const tags = (s.hashtags || []).map(t => '#' + String(t).replace(/^#+/, '').replace(/\s+/g, '')).slice(0, 30).join(' ');
+  return `${s.instagram.trim()}\n\n${tags}`;
+}
+
+async function openSocial(network) {
+  const p = state.cur, N = NET[network];
+  syncBody();
+  if (wordCount() < 150) return toast('Articolul e prea scurt. Scrie sau generează întâi textul.', 'err');
+  const st = await socialStatus();
+  if (!st.connected && !(await connectSocial())) return;
+  if (network === 'instagram' && !state.social.instagram) return toast('Pagina de Facebook nu are un cont de Instagram profesional legat. Leagă-l din aplicația Instagram → Setări → Cont → Pagina de Facebook, apoi deconectează și conectează din nou.', 'err');
+  const btn = $(`[data-social=${network}]`); const old = btn?.innerHTML;
+  if (btn) { btn.disabled = true; btn.innerHTML = `${spinner} Scriu postarea…`; }
+  try { await socialTexts(); } catch (err) { toast(err.message, 'err'); return; }
+  finally { if (btn) { btn.disabled = false; btn.innerHTML = old; } }
+
+  const imgs = [...new Set([p.image_url, ...$$('#ed figure img').map(i => i.getAttribute('src')), ...(p.products || []).map(x => x.image)].filter(Boolean))];
+  if (!imgs.length) return toast('Articolul nu are nicio poză. Alege întâi poza principală.', 'err');
+  let img = imgs[0], fmt = N.formats[0][0];
+  const live = p.status === 'published' && p.shopify_url;
+  const max = network === 'instagram' ? 2200 : 5000;
+  const preview = b => {
+    const [w, h] = fmt.split('x').map(Number);
+    $('#so-prev', b).style.aspectRatio = `${w} / ${h}`;
+    $('#so-prev img', b).src = sizedImg(img, 900);
+    $$('[data-img]', b).forEach(x => x.classList.toggle('ring-2', x.dataset.img === img));
+    $$('[data-fmt]', b).forEach(x => { const on = x.dataset.fmt === fmt; x.classList.toggle('bg-ink', on); x.classList.toggle('text-white', on); });
+  };
+  await ask({
+    title: `Postare pe ${N.name}`, ok: '', hideOk: true, cancel: 'Închide',
+    body: `<div class="space-y-4 max-h-[66vh] overflow-y-auto pr-1">
+      ${!live ? '<p class="text-xs p-2.5 rounded-lg bg-blush-soft text-blush-dark">Articolul nu e publicat încă pe blog — publică-l înainte, ca linkul să meargă.</p>' : ''}
+      <div><div class="flex justify-between items-end mb-1"><span class="text-sm font-semibold">Textul</span><span id="so-count" class="text-xs text-muted"></span></div>
+        <textarea id="so-text" rows="9" class="w-full rounded-lg border border-line px-3 py-2 text-sm leading-relaxed">${esc(socialText(network))}</textarea>
+        <div class="flex flex-wrap gap-3 mt-1 text-xs"><button type="button" data-regen class="inline-flex items-center gap-1 text-moss hover:underline">${sparkle} Altă variantă</button><button type="button" data-copy class="text-muted hover:text-ink">Copiază textul</button>
+        ${network === 'instagram' && live ? '<button type="button" data-copybio class="text-muted hover:text-ink">Copiază linkul pentru bio</button>' : ''}</div></div>
+      <div><p class="text-sm font-semibold mb-1.5">Poza</p>
+        <div class="flex gap-2 overflow-x-auto pb-1 mb-2">${imgs.map(u => `<button type="button" data-img="${esc(u)}" class="w-16 h-16 shrink-0 rounded-lg overflow-hidden border border-line ring-moss"><img src="${esc(sizedImg(u, 200))}" alt="" class="w-full h-full object-cover" /></button>`).join('')}</div>
+        <div class="flex flex-wrap gap-1.5 mb-2">${N.formats.map(([f, l]) => `<button type="button" data-fmt="${f}" class="text-xs px-3 py-1.5 rounded-full border border-line">${l} ${f.replace('x', '×')}</button>`).join('')}</div>
+        <div id="so-prev" class="w-full max-w-[260px] mx-auto rounded-xl overflow-hidden bg-cream"><img alt="" class="w-full h-full object-cover" /></div>
+        <button type="button" data-dl class="mt-2 text-xs text-muted hover:text-ink">⬇ Descarcă poza</button></div>
+      <p id="so-result" class="text-sm"></p>
+      <button type="button" data-publish class="w-full min-h-[48px] rounded-full text-white font-semibold inline-flex items-center justify-center gap-2" style="background:${N.color}">${N.icon} Publică pe ${N.name}</button>
+      <p class="text-xs text-muted">Se publică imediat pe ${network === 'instagram' ? '@' + esc(state.social.instagram) : esc(state.social.page)}.</p>
+    </div>`,
+    onOpen: (b, dlg) => {
+      const ta = $('#so-text', b);
+      const count = () => { const n = ta.value.length, tags = (ta.value.match(/#[\p{L}\p{N}_]+/gu) || []).length;
+        $('#so-count', b).textContent = `${n}/${max} caractere${network === 'instagram' ? ` · ${tags}/30 hashtag-uri` : ''}`;
+        $('#so-count', b).className = `text-xs ${n > max || tags > 30 ? 'text-blush-dark font-semibold' : 'text-muted'}`; };
+      ta.addEventListener('input', count); count(); preview(b);
+      b.addEventListener('click', async e => {
+        const t = e.target;
+        if (t.closest('[data-img]')) { img = t.closest('[data-img]').dataset.img; return preview(b); }
+        if (t.closest('[data-fmt]')) { fmt = t.closest('[data-fmt]').dataset.fmt; return preview(b); }
+        if (t.closest('[data-copy]')) { try { await navigator.clipboard.writeText(ta.value); toast('Textul a fost copiat.'); } catch {} return; }
+        if (t.closest('[data-copybio]')) { try { await navigator.clipboard.writeText(utm(p.shopify_url, 'instagram', p.handle)); toast('Linkul a fost copiat.'); } catch {} return; }
+        if (t.closest('[data-dl]')) { const [w, h] = fmt.split('x').map(Number); try { saveBlob(await cropBlob(img, w, h), `${p.handle || 'articol'}-${network}-${fmt}.jpg`); } catch { window.open(img, '_blank', 'noopener'); } return; }
+        if (t.closest('[data-regen]')) {
+          const r = t.closest('[data-regen]'); r.innerHTML = `${spinner} Scriu…`;
+          try { await socialTexts(true); ta.value = socialText(network); count(); } catch (err) { toast(err.message, 'err'); }
+          r.innerHTML = `${sparkle} Altă variantă`; return;
+        }
+        const pb = t.closest('[data-publish]');
+        if (!pb || pb.disabled) return;
+        const res = $('#so-result', b);
+        if (ta.value.length > max) { res.className = 'text-sm text-blush-dark'; res.textContent = 'Textul e prea lung.'; return; }
+        pb.disabled = true; const label = pb.innerHTML; pb.innerHTML = `${spinner} Public…`; res.textContent = '';
+        try {
+          const [w, h] = fmt.split('x').map(Number);
+          const blob = await cropBlob(img, w, h);
+          const path = `social/${monthKey(new Date())}/${p.handle || 'articol'}-${network}-${Date.now().toString(36)}.jpg`;
+          const up = await sb.storage.from(CFG.BUCKET).upload(path, blob, { contentType: 'image/jpeg' });
+          if (up.error) throw new Error('Nu am putut pregăti poza pentru publicare.');
+          const r = await callFn('social', { action: 'publish', network, text: ta.value, imageUrl: publicUrl(path), postId: p.id });
+          if (!r.ok) throw new Error(r.error || 'Publicarea nu a reușit.');
+          res.className = 'text-sm p-3 rounded-xl bg-moss-soft text-moss-dark';
+          res.innerHTML = `Publicat pe ${N.name}! ${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener" class="font-semibold underline">Vezi postarea ↗</a>` : ''}`;
+          pb.hidden = true;
+          renderSocialBox();
+        } catch (err) {
+          res.className = 'text-sm text-blush-dark'; res.textContent = err.message;
+          pb.disabled = false; pb.innerHTML = label;
+        }
+      });
+    },
+  });
+}
+
+// ---------------------------------------------------------------- linkuri interne
+/** Paginile spre care se pot pune linkuri: colecțiile, articolele publicate, produsele articolului. */
+function linkTargets() {
+  const p = state.cur, out = [];
+  for (const c of state.catalog?.collections || []) out.push({ title: `Colecția ${c.title}`, url: `/collections/${c.handle}` });
+  for (const x of state.posts) if (x !== p && x.status === 'published' && x.shopify_url) {
+    try { out.push({ title: `Articol: ${x.title}`, url: new URL(x.shopify_url).pathname }); } catch {}
+  }
+  for (const x of p.products || []) out.push({ title: `Produs: ${x.title}`, url: `/products/${x.handle}` });
+  return out.slice(0, 80);
+}
+
+async function autoLinks() {
+  const ed = $('#ed');
+  const paras = [...ed.children].filter(el => el.tagName === 'P' && el.textContent.trim().length > 40);
+  if (!paras.length) return toast('Articolul nu are încă text.', 'err');
+  const targets = linkTargets();
+  if (!targets.length) return toast('Nu am găsit pagini spre care să pun linkuri (colecțiile nu s-au încărcat încă).', 'err');
+  const used = new Set([...ed.querySelectorAll('a[href]')].map(a => a.getAttribute('href')));
+  const btn = $('[data-act=auto-links]'); const old = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = `${spinner} Caut locuri…`;
+  const r = await callFn('blog-ai', { action: 'links', targets: targets.filter(t => !used.has(t.url)), paragraphs: paras.map(x => x.textContent) });
+  btn.disabled = false; btn.innerHTML = old;
+  if (!r.ok) return toast(r.error || 'AI-ul nu a răspuns.', 'err');
+  const allowed = new Set(targets.map(t => t.url));
+  let n = 0;
+  for (const l of r.links || []) {
+    const el = paras[l.paragraph];
+    if (!el || !allowed.has(l.url) || used.has(l.url) || !l.anchor?.trim() || el.querySelector('a[data-auto]')) continue;
+    if (wrapText(el, l.anchor.trim(), l.url)) { used.add(l.url); n++; }
+  }
+  queueSave(); updateSide();
+  toast(n ? `Am pus ${n} ${n === 1 ? 'link intern' : 'linkuri interne'}. Le vezi subliniate în text.` : 'Nu am găsit locuri potrivite pentru linkuri noi.');
+}
+/** Pune un link pe prima apariție exactă a textului (în afara altor linkuri). */
+function wrapText(root, text, url) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode: n => n.parentElement.closest('a') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const i = node.data.indexOf(text);
+    if (i < 0) continue;
+    const range = document.createRange();
+    range.setStart(node, i); range.setEnd(node, i + text.length);
+    const a = document.createElement('a');
+    a.href = url; a.setAttribute('href', url); a.dataset.auto = '1';
+    range.surroundContents(a);
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------- întrebări frecvente + cuprins
+function renderFaq() {
+  const box = $('#faq-box'), p = state.cur;
+  if (!box) return;
+  if (!state.canFaq) { box.innerHTML = '<p class="text-sm text-muted">Pentru întrebări frecvente și cuprins rulează <b>migrare-12-blog-faq.sql</b> în Supabase.</p>'; return; }
+  const faq = p.faq || [];
+  box.innerHTML = `
+    <div class="flex flex-wrap items-center gap-3 mb-1">
+      <h2 class="font-semibold">Întrebări frecvente</h2>
+      <button data-act="faq-ai" class="ml-auto inline-flex items-center gap-1.5 text-sm text-moss font-semibold hover:underline">${sparkle} ${faq.length ? 'Generează din nou' : 'Generează cu AI'}</button>
+    </div>
+    <p class="text-xs text-muted mb-3">Apar la finalul articolului, ca listă care se deschide la click. Scrie-le cum le-ar căuta cineva în Google; răspunsul direct, din prima frază.</p>
+    <div class="space-y-3">${faq.map((f, i) => `
+      <div class="rounded-xl border border-line p-3">
+        <div class="flex gap-2 items-start">
+          <input data-faq-q="${i}" value="${esc(f.q)}" placeholder="Întrebarea (ex. Cât rezistă un buchet de trandafiri?)" class="flex-1 rounded-lg border border-line px-3 py-2 text-sm font-medium outline-none focus:ring-2 focus:ring-moss/30" />
+          <button data-faq-del="${i}" class="w-9 h-9 rounded-full text-muted hover:text-blush-dark hover:bg-blush-soft" aria-label="Șterge întrebarea">×</button>
+        </div>
+        <textarea data-faq-a="${i}" rows="3" placeholder="Răspunsul (40–70 de cuvinte)" class="mt-2 w-full rounded-lg border border-line px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-moss/30">${esc(f.a)}</textarea>
+      </div>`).join('') || '<p class="text-sm text-muted">Încă nu sunt întrebări.</p>'}</div>
+    <div class="flex flex-wrap items-center gap-4 mt-3">
+      <button data-act="faq-add" class="text-sm font-semibold hover:underline">+ Întrebare</button>
+      <label class="ml-auto inline-flex items-center gap-2 text-sm"><input id="f-toc" type="checkbox" class="w-4 h-4 accent-moss" ${p.show_toc !== false ? 'checked' : ''} /> Cuprins la începutul articolului</label>
+    </div>`;
+}
+
+async function aiFaq() {
+  const p = state.cur;
+  syncBody();
+  if (wordCount() < 150) return toast('Articolul e prea scurt. Scrie sau generează întâi textul.', 'err');
+  if ((p.faq || []).some(f => f.q || f.a) && !(await ask({ title: 'Înlocuiești întrebările?', ok: 'Generează din nou', body: '<p class="text-sm text-muted">Întrebările actuale se înlocuiesc cu altele noi.</p>' }))) return;
+  const btn = $('[data-act=faq-ai]'); btn.disabled = true; btn.innerHTML = `${spinner} Scriu întrebările…`;
+  const ed = $('#ed').cloneNode(true);
+  $$('.tfs-produs, .tfs-loc-poza, figure', ed).forEach(x => x.remove());
+  const r = await callFn('blog-ai', { action: 'faq', post: { title: p.title, keyword: p.keyword, text: ed.innerText } });
+  if (state.cur !== p) return;
+  if (!r.ok) { renderFaq(); return toast(r.error || 'AI-ul nu a răspuns.', 'err'); }
+  p.faq = (r.faq || []).filter(f => f?.q && f?.a).map(f => ({ q: String(f.q).trim(), a: String(f.a).trim() }));
+  renderFaq(); queueSave(); updateSide();
+}
+
+/** Ce ajunge în Shopify: textul + id-uri pe subtitluri + cuprins + întrebările frecvente. */
+function publishBody() {
+  const p = state.cur, c = document.createElement('div');
+  c.innerHTML = cleanBody(true);
+  const faq = (p.faq || []).filter(f => f.q?.trim() && f.a?.trim());
+  if (faq.length) {
+    const sec = document.createElement('section');
+    sec.className = 'tfs-faq';
+    sec.innerHTML = `<h2>Întrebări frecvente</h2>` + faq.map(f => `<details class="tfs-faq__item" style="border-bottom:1px solid #e5e5e5;padding:14px 0;"><summary style="cursor:pointer;font-weight:600;">${esc(f.q.trim())}</summary><p style="margin:10px 0 0;">${esc(f.a.trim())}</p></details>`).join('');
+    c.appendChild(sec);
+  }
+  const used = new Set();
+  const heads = [...c.querySelectorAll('h2')].map(h => {
+    let id = slugify(h.textContent).slice(0, 60) || 'sectiune', k = id, n = 2;
+    while (used.has(k)) k = `${id}-${n++}`;
+    used.add(k); h.id = k;
+    return { id: k, text: h.textContent.trim() };
+  });
+  if (p.show_toc !== false && heads.length >= 3) {
+    const nav = document.createElement('nav');
+    nav.className = 'tfs-toc';
+    nav.setAttribute('aria-label', 'Cuprins');
+    nav.setAttribute('style', 'border:1px solid #e5e5e5;padding:18px 22px;margin:24px 0 32px;');
+    nav.innerHTML = `<p class="tfs-toc__title" style="margin:0 0 8px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;font-size:13px;">Cuprins</p><ol style="margin:0;padding-left:20px;">${heads.map(h => `<li style="margin:4px 0;"><a href="#${h.id}">${esc(h.text)}</a></li>`).join('')}</ol>`;
+    const firstP = [...c.children].find(el => el.tagName === 'P');
+    if (firstP) firstP.after(nav); else c.prepend(nav);
+  }
+  $$('a[data-auto]', c).forEach(a => a.removeAttribute('data-auto'));
+  return c.innerHTML;
+}
+
 // ---------------------------------------------------------------- ciorna AI
 async function generate() {
   const p = state.cur;
@@ -1136,7 +1498,7 @@ async function generate() {
   state.generating = true; renderGenBtn();
   await autoPick(p);
   const firstGen = p.status === 'idea' || wordCount() <= 30;
-  const r = await callFn('blog-ai', { action: 'draft', post: { themes: themes(), keyword: p.keyword, title: p.title, theme: p.theme, notes: p.notes, products: p.products || [], collection: p.link_collection } });
+  const r = await callFn('blog-ai', { action: 'draft', post: { themes: themes(), links: linkTargets(), keyword: p.keyword, title: p.title, theme: p.theme, notes: p.notes, products: p.products || [], collection: p.link_collection } });
   state.generating = false;
   if (state.cur !== p || state.view !== 'edit') return;
   if (!r.ok) { renderGenBtn(); return toast(r.error || 'AI-ul nu a răspuns.', 'err'); }
@@ -1150,7 +1512,9 @@ async function generate() {
     image_url: p.image_url || (p.products || []).find(x => x.image)?.image || null,
     body_html: injectProducts(sanitize(r.body_html || ''), p.products),
     status: p.status === 'published' ? 'published' : 'draft',
+    faq: Array.isArray(r.faq) && r.faq.length ? r.faq.filter(f => f?.q && f?.a).map(f => ({ q: String(f.q).trim(), a: String(f.a).trim() })) : (p.faq || []),
   });
+  renderFaq();
   p._prevTitle = p.title;
   if (firstGen && r.theme?.trim() && r.theme.trim() !== p.theme) {
     p.theme = r.theme.trim().slice(0, 30);
@@ -1223,9 +1587,10 @@ async function publish() {
   await savePost(p);
   const r = await callFn('shopify-publish', { action: 'article', article: {
     articleId: p.shopify_article_id, blogId: p.blog_id, title: p.title.trim(), handle: p.handle,
-    bodyHtml: cleanBody(true), summaryHtml: p.summary?.trim() ? `<p>${esc(p.summary.trim())}</p>` : '',
+    bodyHtml: publishBody(), summaryHtml: p.summary?.trim() ? `<p>${esc(p.summary.trim())}</p>` : '',
     author: AUTHOR, tags: [p.theme].filter(Boolean), isPublished: !!p.publish_live,
     publishDate: mode === 'scheduled' ? p.scheduled_at : null,
+    faq: state.canFaq ? (p.faq || []).filter(f => f.q?.trim() && f.a?.trim()) : null,
     templateSuffix: TEMPLATE || null,
     seoTitle: p.seo_title || p.title, seoDescription: p.seo_description,
     image: p.image_url ? { url: p.image_url, alt: p.image_alt || p.title } : null,
