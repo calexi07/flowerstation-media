@@ -1454,6 +1454,7 @@ async function aiFaq() {
   if (!r.ok) { renderFaq(); return toast(r.error || 'AI-ul nu a răspuns.', 'err'); }
   p.faq = (r.faq || []).filter(f => f?.q && f?.a).map(f => ({ q: String(f.q).trim(), a: String(f.a).trim() }));
   renderFaq(); queueSave(); updateSide();
+  if (p.faq.length < 3) toast(`AI-ul a dat doar ${p.faq.length} ${p.faq.length === 1 ? 'întrebare' : 'întrebări'}. Mai apasă o dată „Generează din nou” sau adaugă tu cu „+ Întrebare”.`, 'err');
 }
 
 /** Ce ajunge în Shopify: textul + id-uri pe subtitluri + cuprins + întrebările frecvente. */
