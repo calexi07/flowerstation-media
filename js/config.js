@@ -42,3 +42,8 @@ export const SHOPIFY_DESC_FOOTER = [
 
 // Variantele propuse când bifezi „Are variante”
 export const DEFAULT_VARIANTS = ['S', 'M', 'L'];
+
+// ---------------- Blog ----------------
+// Autorul afișat pe articole și temele din planul de articole
+export const BLOG_AUTHOR = 'The Flower Station';
+export const BLOG_THEMES = ['Ocazii', 'Semnificații', 'Îngrijire', 'Local'];
