@@ -942,6 +942,7 @@ async function generate() {
     if (!ok) return;
   }
   state.generating = true; renderGenBtn();
+  await autoPick(p);
   const r = await callFn('blog-ai', { action: 'draft', post: { keyword: p.keyword, title: p.title, theme: p.theme, notes: p.notes, products: p.products || [], collection: p.link_collection } });
   state.generating = false;
   if (state.cur !== p || state.view !== 'edit') return;
@@ -953,6 +954,7 @@ async function generate() {
     summary: r.summary || '',
     handle: p.shopify_article_id && p.handle ? p.handle : (slugify(r.handle || r.title) || p.handle),
     image_alt: p.image_alt?.trim() ? p.image_alt : (r.image_alt || ''),
+    image_url: p.image_url || (p.products || []).find(x => x.image)?.image || null,
     body_html: injectProducts(sanitize(r.body_html || ''), p.products),
     status: p.status === 'published' ? 'published' : 'draft',
   });
@@ -963,7 +965,31 @@ async function generate() {
   renderGenBtn(); updateSide();
   clearTimeout(state.saveTimer); state.saveTimer = null;
   await savePost(p);
-  toast('Ciorna e gata. Citește-o și ajustează ce vrei.');
+  const left = seoChecks().filter(c => c.s !== 'ok').map(c => c.label);
+  toast(left.length ? `Ciorna e gata. Mai ai de completat: ${left.join(', ').toLowerCase()}.` : 'Ciorna e gata și bifează tot. Citește-o și ajustează ce vrei.');
+}
+
+/** Dacă n-ai ales produse sau colecție, le alege din magazin după expresia căutată (le poți schimba). */
+async function autoPick(p) {
+  const words = kwWords(p.keyword);
+  if (!(p.products || []).length && words.length) {
+    const r = await callFn('shopify-publish', { action: 'products', q: words.slice(0, 3).join(' ') });
+    let list = r.ok ? (r.products || []).filter(x => x.status === 'ACTIVE') : [];
+    if (!list.length && words.length > 1) {
+      const r2 = await callFn('shopify-publish', { action: 'products', q: words[words.length - 1] });
+      list = r2.ok ? (r2.products || []).filter(x => x.status === 'ACTIVE') : [];
+    }
+    list.slice(0, 2).forEach(addProduct);
+    if (list.length) toast(`Am ales ${list.length === 1 ? 'un produs' : list.length + ' produse'} din magazin pentru articol. Le poți schimba.`);
+  }
+  if (!p.link_collection && state.catalog?.collections?.length && words.length) {
+    const score = c => kwWords(c.title).filter(w => words.some(k => k.startsWith(w.slice(0, 5)) || w.startsWith(k.slice(0, 5)))).length;
+    const best = [...state.catalog.collections].sort((a, b) => score(b) - score(a))[0];
+    if (best && score(best) > 0) {
+      p.link_collection = { title: best.title, handle: best.handle };
+      const sel = $('#f-coll'); if (sel) sel.innerHTML = collOptions();
+    }
+  }
 }
 
 // ---------------------------------------------------------------- publicare
