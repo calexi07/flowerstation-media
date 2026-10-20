@@ -1,6 +1,6 @@
 // =============================================================
-//  Procesare imagini în browser: decodare (inclusiv HEIC),
-//  versiune master, miniatură, culoare dominantă, exporturi.
+//  Procesare imagini în browser: decodare (inclusiv HEIC iPhone),
+//  versiune optimizată, miniatură, detectarea culorilor florilor.
 // =============================================================
 import { MASTER_MAX, MASTER_JPEG_QUALITY, THUMB_MAX } from './config.js';
 
@@ -104,21 +104,6 @@ export function hasAlpha(dec) {
   const d = ctx.getImageData(0, 0, w, h).data;
   for (let i = 3; i < d.length; i += 4) if (d[i] < 250) return true;
   return false;
-}
-
-export function dominantColor(dec) {
-  const c = canvasOf(8, 8);
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(dec.source, 0, 0, 8, 8);
-  const d = ctx.getImageData(0, 0, 8, 8).data;
-  let r = 0, g = 0, b = 0, n = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    if (d[i + 3] < 40) continue;
-    r += d[i]; g += d[i + 1]; b += d[i + 2]; n++;
-  }
-  if (!n) return '#efe9e1';
-  const hex = v => Math.round(v / n).toString(16).padStart(2, '0');
-  return `#${hex(r)}${hex(g)}${hex(b)}`;
 }
 
 // ---------------------------------------------------------------- culori flori
@@ -249,34 +234,6 @@ export async function makeThumb(dec, alpha) {
   if (blob.type !== 'image/webp') blob = alpha ? await toBlob(c, 'image/png') : await toBlob(c, 'image/jpeg', 0.8);
   const ext = blob.type === 'image/webp' ? 'webp' : blob.type === 'image/png' ? 'png' : 'jpg';
   return { blob, ext };
-}
-
-/**
- * Export într-un format anume.
- * fit 'contain' = doar micșorare; fit 'cover' = crop centrat pe punctul de focus (fx, fy ∈ 0..1).
- */
-export async function exportFormat(dec, fmt, fx = 0.5, fy = 0.5, transparent = false) {
-  const W = dec.width, H = dec.height;
-  let c;
-  if (fmt.fit === 'contain') {
-    const [w, h] = fitWithin(W, H, Math.max(fmt.w, fmt.h));
-    c = canvasOf(w, h);
-    const ctx = c.getContext('2d');
-    ctx.imageSmoothingQuality = 'high';
-    if (!transparent) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
-    ctx.drawImage(dec.source, 0, 0, w, h);
-  } else {
-    const s = Math.max(fmt.w / W, fmt.h / H);
-    const cw = fmt.w / s, ch = fmt.h / s;
-    const cx = Math.min(Math.max(fx * W - cw / 2, 0), W - cw);
-    const cy = Math.min(Math.max(fy * H - ch / 2, 0), H - ch);
-    c = canvasOf(fmt.w, fmt.h);
-    const ctx = c.getContext('2d');
-    ctx.imageSmoothingQuality = 'high';
-    if (!transparent) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, fmt.w, fmt.h); }
-    ctx.drawImage(dec.source, cx, cy, cw, ch, 0, 0, fmt.w, fmt.h);
-  }
-  return transparent ? toBlob(c, 'image/png') : toBlob(c, 'image/jpeg', 0.9);
 }
 
 /** Decodează o imagine de la un URL public (pentru exporturi). */
