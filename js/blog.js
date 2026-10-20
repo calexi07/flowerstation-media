@@ -8,7 +8,20 @@ import { decode, hasAlpha, makeMaster } from './images.js';
 
 const sb = createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const AUTHOR = CFG.BLOG_AUTHOR ?? 'The Flower Station';
-const THEMES = CFG.BLOG_THEMES ?? ['Ocazii', 'Semnificații', 'Îngrijire', 'Local'];
+const BASE_THEMES = CFG.BLOG_THEMES ?? ['Ocazii', 'Semnificații', 'Îngrijire', 'Local'];
+/** Temele: cele din config.js + cele create de tine sau de AI pe articole. */
+const themes = () => [...new Set([...BASE_THEMES, ...state.posts.map(p => p.theme).filter(Boolean)])];
+const NEW_THEME = '__nou';
+const themeOptions = cur => themes().map(t => `<option ${t === cur ? 'selected' : ''}>${esc(t)}</option>`).join('') + `<option value="${NEW_THEME}">+ Temă nouă…</option>`;
+async function askNewTheme() {
+  const t = await ask({
+    title: 'Temă nouă', ok: 'Adaugă',
+    body: field('Numele temei', `<input name="t" maxlength="30" class="${inputCls}" placeholder="Ex: Nunți, Plante, Cadouri" />`),
+    onOpen: b => $('[name=t]', b).focus(),
+    collect: b => $('[name=t]', b).value.trim().replace(/\s+/g, ' '),
+  });
+  return t ? t[0].toUpperCase() + t.slice(1) : null;
+}
 const COLLECTIONS = CFG.SHOPIFY_COLLECTIONS ?? [];
 const TEMPLATE = CFG.BLOG_TEMPLATE_SUFFIX ?? '';
 
@@ -137,18 +150,25 @@ async function loadPosts() {
   state.missingTable = !!error && /blog_posts|relation|schema cache|42P01|PGRST205/i.test(`${error.code} ${error.message}`);
   if (error && !state.missingTable) toast('Nu am putut încărca articolele.', 'err');
   state.posts = data || [];
+  if (!state.missingTable) {
+    const probe = await sb.from('blog_posts').select('scheduled_at').limit(1);
+    state.canSchedule = !probe.error;
+  }
+  // articolele programate a căror oră a trecut sunt acum publicate
+  for (const p of state.posts) if (p.status === 'scheduled' && p.scheduled_at && new Date(p.scheduled_at) <= new Date()) p.status = 'published';
 }
 
 const SAVE_FIELDS = ['title', 'keyword', 'theme', 'month', 'collection', 'status', 'notes', 'body_html', 'summary', 'handle',
   'seo_title', 'seo_description', 'products', 'link_collection', 'image_url', 'image_alt', 'publish_live', 'blog_id',
   'shopify_article_id', 'shopify_admin_url', 'shopify_url', 'shopify_image_key', 'published_at'];
+const saveFields = () => state.canSchedule ? [...SAVE_FIELDS, 'scheduled_at'] : SAVE_FIELDS;
 
 async function savePost(p) {
-  const row = Object.fromEntries(SAVE_FIELDS.map(k => [k, p[k] ?? null]));
+  const row = Object.fromEntries(saveFields().map(k => [k, p[k] ?? null]));
   for (const k of ['title', 'keyword', 'body_html', 'summary', 'handle', 'seo_title', 'seo_description', 'image_alt']) row[k] ??= '';
   row.products ??= [];
   row.publish_live = !!row.publish_live;
-  row.theme ||= THEMES[0];
+  row.theme ||= BASE_THEMES[0];
   row.status ||= 'idea';
   const { data, error } = await sb.from('blog_posts').update(row).eq('id', p.id).select().single();
   if (error) { setSaveState('Nu s-a salvat', true); toast('Nu am putut salva articolul.', 'err'); return false; }
@@ -172,7 +192,7 @@ async function flushSave() {
 function setSaveState(t, err = false) { const el = $('#save-state'); if (el) { el.textContent = t; el.className = `text-xs ${err ? 'text-blush-dark' : 'text-muted'}`; } }
 
 async function createPost(fields) {
-  const row = { title: '', keyword: '', theme: THEMES[0], status: 'idea', ...fields };
+  const row = { title: '', keyword: '', theme: BASE_THEMES[0], status: 'idea', ...fields };
   const { data, error } = await sb.from('blog_posts').insert(row).select().single();
   if (error) { toast('Nu am putut adăuga articolul.', 'err'); return null; }
   state.posts.push(data);
@@ -194,10 +214,16 @@ const STATUS = {
   idea: { label: 'Idee', cls: 'bg-[#EFE9DF] text-[#4F4840]', action: 'Scrie →' },
   draft: { label: 'Ciornă', cls: 'bg-[#F8E7D2] text-[#7A4510]', action: 'Continuă →' },
   published: { label: 'Publicat', cls: 'bg-moss-soft text-moss-dark', action: 'Deschide →' },
+  scheduled: { label: 'Programat', cls: 'bg-[#E3E8F4] text-[#2C3E6B]', action: 'Deschide →' },
 };
+const fmtWhen = d => new Date(d).toLocaleString('ro-RO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+/** valoare pentru <input type="datetime-local"> în ora locală */
+const toLocalInput = d => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 16); };
+const modeOf = p => state.canSchedule && p.scheduled_at && (p.status !== 'published' || new Date(p.scheduled_at) > new Date()) ? 'scheduled' : p.publish_live ? 'live' : 'draft';
 const statusOf = p => {
   const s = STATUS[p.status] || STATUS.idea;
   if (p.status === 'draft' && p.shopify_article_id) return { ...s, label: 'Draft în Shopify' };
+  if (p.status === 'scheduled' && p.scheduled_at) return { ...s, label: `Programat · ${fmtWhen(p.scheduled_at)}` };
   return s;
 };
 
@@ -216,7 +242,7 @@ function renderPlan() {
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(p);
   }
-  const counts = { idea: 0, draft: 0, published: 0 };
+  const counts = { idea: 0, draft: 0, scheduled: 0, published: 0 };
   state.posts.forEach(p => { counts[p.status] = (counts[p.status] || 0) + 1; });
 
   v.innerHTML = `
@@ -224,14 +250,14 @@ function renderPlan() {
     <div class="flex-[1_1_380px]">
       <h1 class="font-serif text-3xl tracking-tight mb-1">Planul de articole</h1>
       <p class="text-sm text-muted max-w-2xl">Fiecare articol pornește de la o expresie pe care oamenii o caută pe Google. Articolele de sezon se publică cu 4–6 săptămâni înainte de ocazie.</p>
-      <p class="text-xs text-muted mt-2">${counts.idea} idei · ${counts.draft} ciorne · ${counts.published} publicate</p>
+      <p class="text-xs text-muted mt-2">${counts.idea} idei · ${counts.draft} ciorne${counts.scheduled ? ` · ${counts.scheduled} programate` : ''} · ${counts.published} publicate</p>
     </div>
     <button data-act="new-idea" class="rounded-full border border-line bg-paper px-4 py-2.5 text-sm font-medium hover:bg-cream">+ Idee nouă</button>
     <button data-act="ai-ideas" ${state.thinkingIdeas ? 'disabled' : ''} class="inline-flex items-center gap-2 rounded-full bg-moss hover:bg-moss-dark text-white px-4 py-2.5 text-sm font-medium disabled:opacity-60">
       ${state.thinkingIdeas ? spinner + ' Caut idei…' : sparkle + ' Propune 10 idei cu AI'}</button>
   </div>
   <div class="flex flex-wrap gap-2 mb-6" role="group" aria-label="Filtru temă">
-    ${['Toate', ...THEMES].map(t => `<button data-filter="${esc(t)}" aria-pressed="${state.filter === t}" class="rounded-full px-3.5 py-2 text-sm ${state.filter === t ? 'bg-ink text-white' : 'bg-paper border border-line hover:bg-cream'}">${esc(t)}</button>`).join('')}
+    ${['Toate', ...themes()].map(t => `<button data-filter="${esc(t)}" aria-pressed="${state.filter === t}" class="rounded-full px-3.5 py-2 text-sm ${state.filter === t ? 'bg-ink text-white' : 'bg-paper border border-line hover:bg-cream'}">${esc(t)}</button>`).join('')}
   </div>
   ${groups.size ? [...groups].map(([m, rows]) => `
     <section class="mb-6">
@@ -288,7 +314,7 @@ async function newIdea() {
       ${field('Titlul propus', `<input name="title" class="${inputCls}" placeholder="Ex: Ce flori dăruiești de 8 Martie" />`)}
       ${field('Expresia căutată pe Google', `<input name="keyword" class="${inputCls}" placeholder="Ex: flori 8 martie" />`)}
       <div class="grid grid-cols-2 gap-3">
-        ${field('Temă', `<select name="theme" class="${inputCls}">${THEMES.map(t => `<option>${esc(t)}</option>`).join('')}</select>`)}
+        ${field('Temă', `<select name="theme" class="${inputCls}">${themeOptions(BASE_THEMES[0])}</select>`)}
         ${field('Luna', `<select name="month" class="${inputCls}"><option value="">fără lună</option>${months.map(m => `<option value="${m}">${esc(monthLabel(m))}</option>`).join('')}</select>`)}
       </div>
       ${field('Duce spre (produse)', `<input name="collection" list="dl-col" class="${inputCls}" placeholder="Ex: Buchete flori" /><datalist id="dl-col">${COLLECTIONS.map(c => `<option value="${esc(c)}">`).join('')}</datalist>`)}
@@ -297,6 +323,7 @@ async function newIdea() {
     collect: b => Object.fromEntries(['title', 'keyword', 'theme', 'month', 'collection'].map(k => [k, $(`[name=${k}]`, b).value.trim() || null])),
   });
   if (!r) return;
+  if (r.theme === NEW_THEME) r.theme = (await askNewTheme()) || BASE_THEMES[0];
   if (!r.title && !r.keyword) return toast('Scrie măcar titlul sau expresia căutată.', 'err');
   if (await createPost({ ...r, title: r.title || '', keyword: r.keyword || '' })) { renderPlan(); toast('Ideea a fost adăugată în plan.'); }
 }
@@ -304,7 +331,7 @@ async function newIdea() {
 async function aiIdeas() {
   state.thinkingIdeas = true; renderPlan();
   const months = nextMonths(6);
-  const r = await callFn('blog-ai', { action: 'ideas', count: 10, months, existing: state.posts.map(p => p.title || p.keyword).filter(Boolean) });
+  const r = await callFn('blog-ai', { action: 'ideas', count: 10, months, themes: themes(), existing: state.posts.map(p => p.title || p.keyword).filter(Boolean) });
   state.thinkingIdeas = false; renderPlan();
   if (!r.ok) return toast(r.error || 'AI-ul nu a răspuns.', 'err');
   const ideas = (r.ideas || []).filter(i => i.title);
@@ -322,7 +349,7 @@ async function aiIdeas() {
   });
   if (!picked?.length) return;
   for (const i of picked) {
-    await createPost({ title: i.title, keyword: i.keyword, theme: THEMES.includes(i.theme) ? i.theme : THEMES[0], month: /^\d{4}-\d{2}$/.test(i.month) ? i.month : null, collection: i.collection || null });
+    await createPost({ title: i.title, keyword: i.keyword, theme: (i.theme || '').trim().slice(0, 30) || BASE_THEMES[0], month: /^\d{4}-\d{2}$/.test(i.month) ? i.month : null, collection: i.collection || null });
   }
   renderPlan();
   toast(`${picked.length} ${picked.length === 1 ? 'idee adăugată' : 'idei adăugate'} în plan.`);
@@ -495,20 +522,24 @@ function pubHtml() {
     <button data-act="retry-cat" class="rounded-full border border-line px-4 py-2 text-sm hover:bg-cream">Încearcă din nou</button>`;
   if (!cat) return `<h2 class="font-semibold mb-2">Publicare</h2><p class="text-sm text-muted">${spinner} Mă conectez la Shopify…</p>`;
   const changed = p.published_at && p.updated_at && new Date(p.updated_at) - new Date(p.published_at) > 5000;
+  const mode = modeOf(p);
   const seg = on => `flex-1 min-h-[40px] rounded-full text-sm font-medium ${on ? 'bg-paper shadow-sm' : 'text-muted'}`;
   return `
     <h2 class="font-semibold mb-3">Publicare</h2>
     <label class="flex items-center justify-between gap-3 text-sm mb-3"><span class="text-muted">Blog</span>
       <select id="f-blog" class="rounded-lg border border-line px-2 py-1.5 text-sm max-w-[60%]">${cat.blogs.map(b => `<option value="${esc(b.id)}" ${b.id === p.blog_id ? 'selected' : ''}>${esc(b.title)}</option>`).join('')}</select></label>
     <div class="flex bg-[#F3EFE8] rounded-full p-1 mb-3" role="group" aria-label="Stare">
-      <button type="button" data-live="0" aria-pressed="${!p.publish_live}" class="${seg(!p.publish_live)}">Draft</button>
-      <button type="button" data-live="1" aria-pressed="${!!p.publish_live}" class="${seg(p.publish_live)}">Publicat</button>
+      <button type="button" data-mode="draft" aria-pressed="${mode === 'draft'}" class="${seg(mode === 'draft')}">Draft</button>
+      <button type="button" data-mode="live" aria-pressed="${mode === 'live'}" class="${seg(mode === 'live')}">Publicat</button>
+      ${state.canSchedule ? `<button type="button" data-mode="scheduled" aria-pressed="${mode === 'scheduled'}" class="${seg(mode === 'scheduled')}">Programat</button>` : ''}
     </div>
+    ${mode === 'scheduled' ? `<label class="block mb-3"><span class="text-xs font-medium">Data și ora publicării</span>
+      <input id="f-when" type="datetime-local" class="${inputCls}" min="${toLocalInput(Date.now() + 5 * 60e3)}" value="${p.scheduled_at ? toLocalInput(p.scheduled_at) : ''}" /></label>` : ''}
     <button data-act="publish" ${state.publishing ? 'disabled' : ''} class="w-full min-h-[48px] rounded-full bg-ink text-white font-semibold text-sm disabled:opacity-60 inline-flex items-center justify-center gap-2">
-      ${state.publishing ? spinner + ' Trimit în Shopify…' : p.shopify_article_id ? (p.publish_live ? 'Actualizează pe blog' : 'Actualizează draftul în Shopify') : (p.publish_live ? 'Publică pe blog' : 'Trimite ca draft în Shopify')}</button>
-    <p class="text-xs text-muted mt-2">${p.publish_live ? 'Articolul apare imediat pe site.' : 'Articolul ajunge în Shopify ascuns; îl publici de acolo sau de aici, mai târziu.'}</p>
+      ${state.publishing ? spinner + ' Trimit în Shopify…' : { draft: p.shopify_article_id ? 'Actualizează draftul în Shopify' : 'Trimite ca draft în Shopify', live: p.shopify_article_id ? 'Actualizează pe blog' : 'Publică pe blog', scheduled: p.shopify_article_id ? 'Actualizează programarea' : 'Programează articolul' }[mode]}</button>
+    <p class="text-xs text-muted mt-2">${{ draft: 'Articolul ajunge în Shopify ascuns; îl publici mai târziu.', live: 'Articolul apare imediat pe site.', scheduled: 'Articolul apare singur pe site la data și ora alese (ora României).' }[mode]}${!state.canSchedule ? ' Pentru programare rulează migrare-10-blog-programare.sql.' : ''}</p>
     ${p.shopify_article_id ? `<div class="mt-3 p-3 rounded-xl bg-moss-soft text-sm">
-      <p class="text-moss-dark">${p.status === 'published' ? 'Publicat pe blog' : 'Draft în Shopify'} · ${esc(fmtDate(p.published_at))}
+      <p class="text-moss-dark">${p.status === 'published' ? 'Publicat pe blog' : p.status === 'scheduled' ? `Programat pentru ${esc(fmtWhen(p.scheduled_at))}` : 'Draft în Shopify'} · trimis ${esc(fmtDate(p.published_at))}
         ${changed ? '<span class="ml-1 px-2 py-0.5 rounded-full bg-blush-soft text-blush-dark text-xs">modificat după trimitere</span>' : ''}</p>
       <p class="mt-1 flex flex-wrap gap-x-4"><a class="text-moss font-medium hover:underline" href="${esc(p.shopify_admin_url)}" target="_blank" rel="noopener">Deschide în Shopify ↗</a>
         ${p.status === 'published' && p.shopify_url ? `<a class="text-moss font-medium hover:underline" href="${esc(p.shopify_url)}" target="_blank" rel="noopener">Vezi pe site ↗</a>` : ''}</p></div>` : ''}`;
@@ -539,7 +570,7 @@ function renderEditor() {
       <section class="bg-paper border border-line rounded-2xl p-5 space-y-4">
         <div class="grid sm:grid-cols-[1fr_auto_auto] gap-3">
           ${field('Expresia căutată pe Google', `<input id="f-keyword" class="${inputCls}" value="${esc(p.keyword)}" placeholder="Ex: flori aniversare" />`)}
-          ${field('Temă', `<select id="f-theme" class="${inputCls}">${THEMES.map(t => `<option ${t === p.theme ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`)}
+          ${field('Temă', `<select id="f-theme" class="${inputCls}">${themeOptions(p.theme)}</select>`)}
           ${field('Luna', `<select id="f-month" class="${inputCls}"><option value="">fără lună</option>${[...new Set([...(p.month ? [p.month] : []), ...nextMonths(8)])].sort().map(m => `<option value="${m}" ${m === p.month ? 'selected' : ''}>${esc(monthLabel(m))}</option>`).join('')}</select>`)}
         </div>
         ${field('Titlul articolului', `<input id="f-title" class="${inputCls} !text-lg font-serif" value="${esc(p.title)}" placeholder="Ex: Flori de aniversare: cum alegi buchetul potrivit" />`)}
@@ -667,9 +698,16 @@ $('#view').addEventListener('input', e => {
 $('#view').addEventListener('change', e => {
   if (state.view !== 'edit') return;
   const p = state.cur, id = e.target.id;
-  if (id === 'f-theme') p.theme = e.target.value;
+  if (id === 'f-theme') {
+    if (e.target.value === NEW_THEME) {
+      askNewTheme().then(t => { if (t) { p.theme = t; queueSave(); } e.target.innerHTML = themeOptions(p.theme); });
+      return;
+    }
+    p.theme = e.target.value;
+  }
   else if (id === 'f-month') p.month = e.target.value || null;
   else if (id === 'f-blog') p.blog_id = e.target.value;
+  else if (id === 'f-when') p.scheduled_at = e.target.value ? new Date(e.target.value).toISOString() : null;
   else if (id === 'f-handle') { e.target.value = p.handle; }
   else if (id === 'f-coll') {
     const list = state.catalog?.collections?.length ? state.catalog.collections : COLLECTIONS.map(t => ({ title: t, handle: slugify(t) }));
@@ -710,8 +748,14 @@ $('#view').addEventListener('click', async e => {
     return;
   }
   if (t.closest('#ed a')) { e.preventDefault(); return; }
-  const live = t.closest('[data-live]');
-  if (live) { p.publish_live = live.dataset.live === '1'; queueSave(); return updateSide(); }
+  const modeBtn = t.closest('[data-mode]');
+  if (modeBtn) {
+    const m = modeBtn.dataset.mode;
+    p.publish_live = m !== 'draft';
+    if (m === 'scheduled') p.scheduled_at = p.scheduled_at && new Date(p.scheduled_at) > new Date() ? p.scheduled_at : new Date(Date.now() + 864e5).toISOString().replace(/T.*/, 'T07:00:00.000Z');
+    else p.scheduled_at = null;
+    queueSave(); return updateSide();
+  }
   const un = t.closest('[data-unprod]');
   if (un) { p.products = (p.products || []).filter(x => x.handle !== un.dataset.unprod); $('#prod-chips').innerHTML = chipsHtml(); return queueSave(); }
   const act = t.closest('[data-act]')?.dataset.act;
@@ -943,7 +987,8 @@ async function generate() {
   }
   state.generating = true; renderGenBtn();
   await autoPick(p);
-  const r = await callFn('blog-ai', { action: 'draft', post: { keyword: p.keyword, title: p.title, theme: p.theme, notes: p.notes, products: p.products || [], collection: p.link_collection } });
+  const firstGen = p.status === 'idea' || wordCount() <= 30;
+  const r = await callFn('blog-ai', { action: 'draft', post: { themes: themes(), keyword: p.keyword, title: p.title, theme: p.theme, notes: p.notes, products: p.products || [], collection: p.link_collection } });
   state.generating = false;
   if (state.cur !== p || state.view !== 'edit') return;
   if (!r.ok) { renderGenBtn(); return toast(r.error || 'AI-ul nu a răspuns.', 'err'); }
@@ -959,6 +1004,10 @@ async function generate() {
     status: p.status === 'published' ? 'published' : 'draft',
   });
   p._prevTitle = p.title;
+  if (firstGen && r.theme?.trim() && r.theme.trim() !== p.theme) {
+    p.theme = r.theme.trim().slice(0, 30);
+    $('#f-theme').innerHTML = themeOptions(p.theme);
+  }
   for (const [id, k] of Object.entries({ 'f-title': 'title', 'f-seot': 'seo_title', 'f-seod': 'seo_description', 'f-summary': 'summary', 'f-handle': 'handle' })) $('#' + id).value = p[k] || '';
   $('#ed').innerHTML = p.body_html;
   $('#img-box').innerHTML = imgHtml();
@@ -1000,6 +1049,11 @@ async function publish() {
   if (wordCount() < 50) return toast('Articolul e aproape gol. Scrie sau generează textul întâi.', 'err');
   if (!p.blog_id) return toast('Alege blogul.', 'err');
   if (!p.handle) p.handle = slugify(p.title);
+  const mode = modeOf(p);
+  if (mode === 'scheduled') {
+    if (!p.scheduled_at) return toast('Alege data și ora publicării.', 'err');
+    if (new Date(p.scheduled_at) < new Date(Date.now() + 3 * 60e3)) return toast('Alege o dată din viitor (cel puțin peste câteva minute).', 'err');
+  }
   if (p.publish_live) {
     const bad = seoChecks().filter(c => c.s === 'bad');
     if (bad.length) {
@@ -1023,6 +1077,7 @@ async function publish() {
     articleId: p.shopify_article_id, blogId: p.blog_id, title: p.title.trim(), handle: p.handle,
     bodyHtml: cleanBody(true), summaryHtml: p.summary?.trim() ? `<p>${esc(p.summary.trim())}</p>` : '',
     author: AUTHOR, tags: [p.theme].filter(Boolean), isPublished: !!p.publish_live,
+    publishDate: mode === 'scheduled' ? p.scheduled_at : null,
     templateSuffix: TEMPLATE || null,
     seoTitle: p.seo_title || p.title, seoDescription: p.seo_description,
     image: p.image_url ? { url: p.image_url, alt: p.image_alt || p.title } : null,
@@ -1033,12 +1088,14 @@ async function publish() {
   Object.assign(p, {
     shopify_article_id: r.articleId, shopify_admin_url: r.adminUrl, shopify_url: r.storeUrl, handle: r.handle || p.handle,
     shopify_image_key: p.image_url || null, published_at: new Date().toISOString(),
-    status: r.isPublished ? 'published' : 'draft',
+    status: r.scheduled ? 'scheduled' : r.isPublished ? 'published' : 'draft',
   });
+  if (r.scheduled && r.publishedAt) p.scheduled_at = r.publishedAt;
+  if (!r.scheduled && mode === 'scheduled') p.scheduled_at = null;
   $('#f-handle').value = p.handle;
   await savePost(p);
   updateSide();
-  toast(r.isPublished ? (r.created ? 'Articolul e publicat pe blog.' : 'Articolul a fost actualizat pe blog.') : 'Articolul e în Shopify, ca draft.');
+  toast(r.scheduled ? `Articolul e programat pentru ${fmtWhen(p.scheduled_at)}.` : r.isPublished ? (r.created ? 'Articolul e publicat pe blog.' : 'Articolul a fost actualizat pe blog.') : 'Articolul e în Shopify, ca draft.');
   for (const w of r.warnings || []) toast(w, 'err');
 }
 
