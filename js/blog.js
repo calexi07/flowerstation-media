@@ -792,6 +792,7 @@ function renderEditor() {
   renderFaq();
   updateSide();
   loadCatalog();
+  refreshCards();
   loadPostGsc();
   socialStatus().then(renderSocialBox);
 }
@@ -1363,6 +1364,28 @@ async function openSocial(network) {
       });
     },
   });
+}
+
+// ---------------------------------------------------------------- carduri de produs vechi → stilul nou
+/** Cardurile puse înainte de noul design (sau cu preț vechi) se refac cu datele actuale din Shopify. */
+async function refreshCards() {
+  const p = state.cur, ed = $('#ed');
+  const cards = $$('.tfs-produs', ed);
+  const old = cards.filter(c => !c.querySelector('.tfs-produs__btn'));
+  if (!old.length) return;
+  const handles = [...new Set(old.map(c => c.dataset.handle).filter(Boolean))];
+  const r = await callFn('shopify-publish', { action: 'products', handles });
+  if (!r.ok || state.cur !== p) return;
+  let n = 0;
+  for (const c of old) {
+    const pr = (r.products || []).find(x => x.handle === c.dataset.handle);
+    if (!pr) continue;
+    c.replaceWith(nodeFrom(productCard(pr)));
+    const i = (p.products || []).findIndex(x => x.handle === pr.handle);
+    if (i >= 0) p.products[i] = { title: pr.title, handle: pr.handle, image: pr.image, price: pr.price, priceVaries: !!pr.priceVaries, variantId: pr.variantId || null };
+    n++;
+  }
+  if (n) { queueSave(); updateSide(); toast(`Am adus ${n === 1 ? 'cardul de produs' : n + ' carduri de produs'} la noul design. Apasă „Actualizează pe blog” ca să apară și pe site.`); }
 }
 
 // ---------------------------------------------------------------- linkuri interne
