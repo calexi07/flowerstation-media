@@ -1,75 +1,46 @@
-# The Flower Station · Media Library
+# The Flower Station · Produse Shopify
 
-Bibliotecă internă de imagini (produse, branding, interior/exterior magazin, evenimente…) pentru echipa TheFlowerStation.ro. Găzduită pe **media.theflowerstation.ro**.
+Aplicație internă pentru adăugarea de produse noi în magazinul Shopify, în bloc. Adresa: **media.theflowerstation.ro**.
 
-**Stack:** HTML + vanilla JS (ES modules) + Tailwind CDN, fără build · Supabase (Auth + Postgres + Storage) · GitHub Pages.
+**Fluxul:** încarci pozele → le grupezi pe produse → completezi fiecare produs → descarci CSV-ul → îl imporți în Shopify.
 
-## Ce face
+**Stack:** HTML + vanilla JS (ES modules) + Tailwind CDN, fără build · Supabase (login, bază de date, stocare poze) · GitHub Pages.
 
-- **Login** pentru echipă (email + parolă sau link magic). Fără înregistrare publică.
-- **Upload în masă** prin drag & drop oriunde pe pagină. Categorie, tag-uri și credit se aplică întregului lot; titlul se editează per fișier.
-- **Optimizare automată în browser:** se salvează o versiune master de max. 2400 px (JPG, sau PNG dacă are transparență) + miniatură WebP. Originalul se păstrează doar dacă bifezi opțiunea. Poze iPhone (HEIC) sunt convertite automat. SVG și GIF rămân neschimbate.
-- **Detectare duplicate** (amprentă SHA-256 a fișierului).
-- **Căutare** după titlu, tag-uri, text alternativ, descriere, credit, categorie — funcționează cu sau fără diacritice („vitrina” găsește „vitrină”).
-- **Filtre:** categorie, orientare, tag-uri (cumulative). Sortare.
-- **Link public direct** pentru site/Shopify/newsletter, plus snippet HTML (`<img>` cu alt, width, height) și Markdown — util și pentru blog.
-- **Download în formate:** Web 1600, Instagram 1:1 și 4:5, Story 9:16, Facebook/link 1200×630, Banner 1920×800. Crop-ul se face în jurul **punctului de focus** (click pe imagine în fereastra de detaliu).
-- **Produse — flori și culori:** la categoria *Produse* alegi florile din imagine (listă care crește singură când adaugi flori noi), iar culorile buchetului se detectează automat la upload (fundalul și verdeața sunt ignorate). Le poți corecta manual din fereastra de detaliu; „↻ Detectează automat” revine la sugestia automată. Filtre pe culori și flori în sidebar; căutarea găsește și după flori/culori.
-- **Selecție multiplă:** adaugă tag, mută în categorie, descarcă ZIP, șterge.
-- Link direct către o imagine pentru colegi: `media.theflowerstation.ro/#a=<id>`.
-- Indicator de spațiu folosit în sidebar.
+## Cum se folosește
 
-## Instalare (≈15 minute)
+1. **Grupează pozele.** Apeși **⬆ Încarcă poze** (sau tragi pozele pe pagină). Merg JPG, PNG și HEIC de pe iPhone; pozele sunt optimizate automat și dublurile ignorate. Selectezi pozele unui buchet → **+ Produs din selecție**. Le poți trage între produse, reordona (prima e poza principală) sau șterge. **⚡ Grupează automat** pune împreună pozele făcute la mai puțin de 5 minute una de alta.
+2. **Completează**, câte un produs: nume, preț (sau variante cu prețuri diferite), tip produs, colecție, primul paragraf din descriere, flori, culori (detectate automat, se pot schimba), tag-uri, SEO. Click pe o poză → alegi decupajul pătrat (sus/jos, zoom). **✓ Validează și continuă** verifică ce lipsește și trece la următorul.
+3. **Descarcă CSV.** Alegi Draft sau Activ (pe fiecare sau pe toate), apoi descarci fișierul.
+4. **În Shopify:** Produse → Importă → fișierul → Importă produsele. Apoi Editare în bloc → coloana Template → `template-tfs`.
+5. **＋ Produse noi** pornește următorul lot. Produsele trimise rămân la **🕘 Exportate**, unde pot fi modificate și exportate din nou.
 
-### 1. Supabase
-1. Creează un proiect nou pe [supabase.com](https://supabase.com) (regiune: Frankfurt `eu-central-1`).
-2. **SQL Editor → New query** → lipește tot din `supabase/schema.sql` → **Run**. Creează tabelele, categoriile inițiale, politicile RLS și bucket-ul public `media`.
-3. **Authentication → Sign In / Providers → Email:** dezactivează **Allow new users to sign up** (doar tu adaugi conturi).
-4. **Authentication → URL Configuration:**
-   - Site URL: `https://media.theflowerstation.ro`
-   - Redirect URLs: adaugă `https://media.theflowerstation.ro/**` (și `http://localhost:*/**` pentru test local).
-5. **Authentication → Users → Add user / Invite user** pentru fiecare coleg.
-6. **Project Settings → API:** copiază *Project URL* și cheia *anon / publishable* în `js/config.js`.
+## Ce se completează automat la export
 
-### 2. GitHub Pages
-1. Repo nou (ex. `flowerstation-media`), urcă toate fișierele din acest folder.
-2. **Settings → Pages:** Source = *Deploy from a branch*, branch `main`, folder `/ (root)`.
-3. Fișierul `CNAME` setează deja domeniul `media.theflowerstation.ro`.
+- Paragrafele standard de la finalul descrierii (livrare, contact, produs perisabil)
+- Furnizor *The Flower Station* și categoria Shopify după tip (Fresh Cut Flowers / Plants / Candles)
+- Tag-uri: colecția, florile și culorile, pe lângă cele scrise de mână
+- Titlu și descriere SEO, text alternativ pentru poze, link produs unic
+- Poze pătrate, max. 2048 × 2048, decupate cum ai ales
 
-### 3. DNS (la registrarul domeniului theflowerstation.ro)
-Adaugă un record:
+## Setări
 
-| Tip   | Nume / Host | Valoare                      |
-|-------|-------------|------------------------------|
-| CNAME | `media`     | `<user-github>.github.io`    |
+Tot ce ține de magazin e în **`js/config.js`**: tipurile de produs, colecțiile, paragrafele standard, variantele propuse (S/M/L). Modifici acolo și urci fișierul în GitHub.
 
-Atenție: dacă domeniul e gestionat prin Shopify (Shopify → Settings → Domains), adaugă recordul din **Domains → theflowerstation.ro → DNS settings**. Nu atinge recordurile existente pentru `@` și `www` — acelea țin site-ul Shopify.
+## Instalare de la zero
 
-După propagare (de la câteva minute la câteva ore): GitHub → Settings → Pages → bifează **Enforce HTTPS**.
+1. **Supabase:** proiect nou → SQL Editor → rulează `supabase/schema.sql`. La Authentication dezactivează înregistrarea publică și adaugă utilizatorii (Auto Confirm). La URL Configuration: Site URL `https://media.theflowerstation.ro` și Redirect URL `https://media.theflowerstation.ro/**`.
+2. Pune URL-ul proiectului și cheia publishable în `js/config.js`.
+3. **GitHub Pages:** urcă fișierele în rădăcina repo-ului → Settings → Pages → branch `main` / root. `CNAME` setează domeniul.
+4. **DNS (web365 → Zone Editor):** CNAME `media` → `calexi07.github.io`.
 
-### 4. Test local (opțional)
-```bash
-npx serve .        # sau: python3 -m http.server 8080
-```
-Deschide `http://localhost:3000` (sau portul afișat). Fișierele nu merg deschise direct cu dublu-click (ES modules au nevoie de un server).
-
-## Spațiu & costuri
-
-Planul **Free** Supabase: 1 GB storage, 5 GB trafic/lună, iar proiectul se **pune pe pauză după o săptămână fără activitate** (se reactivează din dashboard). Cu optimizarea automată, o fotografie ocupă ~0,4–0,9 MB → aproximativ 1.200–2.000 de imagini în 1 GB.
-
-Când crește biblioteca sau vrei să nu se mai pună pe pauză: **Pro, $25/lună** — 100 GB storage, 250 GB trafic. Schimbă apoi `STORAGE_QUOTA_BYTES` din `js/config.js`.
-
-**Recomandare pentru site:** linkurile publice merg perfect în Shopify, newsletter și blog. Pentru imaginile *permanente* din tema Shopify (hero, colecții), urcă-le totuși în Shopify (Content → Files) — trec prin CDN-ul Shopify, cu redimensionare automată, și nu consumă traficul Supabase.
-
-## Structură
+## Fișiere
 
 ```
-index.html          UI (login, bibliotecă, detaliu, upload)
-js/config.js        chei Supabase + formate de export
-js/images.js        procesare imagini în browser (master, miniatură, HEIC, crop-uri)
-js/app.js           logica aplicației
-supabase/schema.sql tabele, RLS, bucket
-CNAME               domeniul custom pentru GitHub Pages
+index.html                     interfața
+js/app.js                      logica aplicației
+js/images.js                   procesarea pozelor în browser (HEIC, optimizare, culori)
+js/config.js                   chei Supabase + setările magazinului
+supabase/schema.sql            schema completă (instalare nouă)
+supabase/migrare-07-curatare.sql  actualizare pentru instalarea existentă
+CNAME                          domeniul pentru GitHub Pages
 ```
-
-Fișierele din storage: `media/AAAA/LL/<id>/<titlu-slug>.jpg` (nume prietenoase SEO) + `thumb.webp` + opțional `original-<titlu>.<ext>`.
