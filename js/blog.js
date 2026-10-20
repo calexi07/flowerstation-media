@@ -4,6 +4,7 @@
 // =============================================================
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import * as CFG from './config.js';
+import { decode, hasAlpha, makeMaster } from './images.js';
 
 const sb = createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const AUTHOR = CFG.BLOG_AUTHOR ?? 'The Flower Station';
@@ -355,7 +356,7 @@ function sanitize(html) {
   const doc = new DOMParser().parseFromString(`<div>${html}</div>`, 'text/html');
   const walk = node => {
     for (const ch of [...node.childNodes]) {
-      if (ch.nodeType === 8) { if (!/^\s*PRODUS:[a-z0-9-]+\s*$/i.test(ch.data)) ch.remove(); continue; }
+      if (ch.nodeType === 8) { if (!/^\s*(PRODUS:[a-z0-9-]+|POZA:[^>]*)\s*$/i.test(ch.data)) ch.remove(); continue; }
       if (ch.nodeType !== 1) continue;
       const tag = ch.tagName;
       if (['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'IMG', 'FORM'].includes(tag)) { ch.remove(); continue; }
@@ -372,22 +373,28 @@ function sanitize(html) {
   walk(root);
   return root.innerHTML;
 }
+const placeholderHtml = desc => `<div class="tfs-loc-poza" contenteditable="false" data-desc="${esc(desc)}">Aici merge o poză: ${esc(desc || 'alege una potrivită')}</div>`;
 function injectProducts(html, products) {
   const byHandle = new Map((products || []).map(p => [p.handle, p]));
   const used = new Set();
   const rep = (_m, h) => { const p = byHandle.get(h); if (!p || used.has(h)) return ''; used.add(h); return productCard(p); };
+  const spot = (_m, d) => placeholderHtml(d.trim());
   return html
     .replace(/<p>\s*<!--\s*PRODUS:([a-z0-9-]+)\s*-->\s*<\/p>/gi, rep)
-    .replace(/<!--\s*PRODUS:([a-z0-9-]+)\s*-->/gi, rep);
+    .replace(/<!--\s*PRODUS:([a-z0-9-]+)\s*-->/gi, rep)
+    .replace(/<p>\s*<!--\s*POZA:([^>]*?)-->\s*<\/p>/gi, spot)
+    .replace(/<!--\s*POZA:([^>]*?)-->/gi, spot);
 }
 
 /** HTML-ul curat al articolului, așa cum ajunge în Shopify. */
-function cleanBody() {
+function cleanBody(forPublish = false) {
   const ed = $('#ed');
   if (!ed) return state.cur?.body_html ?? '';
   const c = ed.cloneNode(true);
+  if (forPublish) $$('.tfs-loc-poza', c).forEach(x => x.remove());
   $$('[contenteditable]', c).forEach(x => x.removeAttribute('contenteditable'));
   $$('p', c).forEach(p => { if (!p.textContent.trim() && !p.querySelector('img')) p.remove(); });
+  $$('figure', c).forEach(f => f.removeAttribute('contenteditable'));
   return c.innerHTML.trim();
 }
 function syncBody() {
@@ -399,7 +406,7 @@ function wordCount() {
   const ed = $('#ed');
   if (!ed) return 0;
   const c = ed.cloneNode(true);
-  $$('.tfs-produs', c).forEach(x => x.remove());
+  $$('.tfs-produs, .tfs-loc-poza, figure', c).forEach(x => x.remove());
   return (c.innerText || c.textContent || '').split(/\s+/).filter(w => /\p{L}/u.test(w)).length;
 }
 
@@ -422,6 +429,8 @@ function seoChecks() {
     { s: lvl(h2 >= 3, h2 >= 1), label: 'Cel puțin 3 subtitluri (H2)', hint: `${h2} ${h2 === 1 ? 'subtitlu' : 'subtitluri'}` },
     { s: lvl(words >= 800, words >= 500), label: 'Minim 800 de cuvinte', hint: `${words} cuvinte` },
     { s: lvl(links >= 1, false), label: 'Link spre produse sau colecții', hint: links ? `${links} ${links === 1 ? 'link' : 'linkuri'}` : 'adaugă un produs din magazin' },
+    (() => { const imgs = ed ? [...ed.querySelectorAll('figure img')] : []; const noAlt = imgs.filter(i => !i.alt.trim()).length;
+      return { s: lvl(imgs.length >= 2 && !noAlt, imgs.length >= 1), label: 'Cel puțin 2 poze în text', hint: imgs.length ? `${imgs.length} ${imgs.length === 1 ? 'poză' : 'poze'}${noAlt ? `, ${noAlt} fără text alternativ` : ''}` : (ed?.querySelector('.tfs-loc-poza') ? 'completează locurile marcate' : 'butonul „Poză” din bara editorului') }; })(),
     { s: lvl(p.image_url && p.image_alt?.trim(), p.image_url), label: 'Poză principală cu text alternativ', hint: !p.image_url ? 'alege poza' : p.image_alt?.trim() ? 'da' : 'scrie textul alternativ' },
     { s: lvl(p.handle && p.handle.length <= 60 && /^[a-z0-9-]+$/.test(p.handle), !!p.handle), label: 'Link scurt și curat', hint: p.handle ? `/${p.handle}` : 'se face din titlu' },
   ];
@@ -505,7 +514,9 @@ function pubHtml() {
 }
 
 function collOptions() {
-  const p = state.cur, cols = state.catalog?.collections || [];
+  const p = state.cur;
+  // colecțiile din Shopify; până se încarcă (sau dacă Shopify nu răspunde) — lista din config.js
+  const cols = state.catalog?.collections?.length ? state.catalog.collections : COLLECTIONS.map(t => ({ title: t, handle: slugify(t) }));
   const cur = p.link_collection?.handle || '';
   const opts = cols.map(c => `<option value="${esc(c.handle)}" ${c.handle === cur ? 'selected' : ''}>${esc(c.title)}</option>`).join('');
   return `<option value="">— niciuna —</option>${opts}${cur && !cols.some(c => c.handle === cur) ? `<option value="${esc(cur)}" selected>${esc(p.link_collection.title)}</option>` : ''}`;
@@ -549,6 +560,7 @@ function renderEditor() {
           <span class="w-px h-6 bg-line mx-1"></span>
           ${tb('bold', 'B', 'font-bold')}${tb('italic', 'I', 'italic font-serif')}${tb('ul', '• Listă')}${tb('ol', '1. Listă')}${tb('link', 'Link')}
           <span class="w-px h-6 bg-line mx-1"></span>
+          <button type="button" data-act="insert-img" class="min-h-[40px] px-3 rounded-lg border border-line bg-paper text-sm font-semibold hover:bg-cream">+ Poză</button>
           <button type="button" data-act="insert-prod" class="min-h-[40px] px-3 rounded-lg border border-moss/30 bg-moss-soft text-moss-dark text-sm font-semibold">+ Produs din magazin</button>
           <span id="words" class="ml-auto text-xs text-muted"></span>
         </div>
@@ -575,7 +587,7 @@ function renderEditor() {
     </aside>
   </div>`;
   $('#ed').innerHTML = p.body_html || '';
-  $$('#ed .tfs-produs').forEach(x => x.setAttribute('contenteditable', 'false'));
+  $$('#ed .tfs-produs, #ed .tfs-loc-poza, #ed figure').forEach(x => x.setAttribute('contenteditable', 'false'));
   renderGenBtn();
   $('#img-box').innerHTML = imgHtml();
   updateSide();
@@ -612,11 +624,14 @@ async function loadCatalog(force = false) {
       : (r.error || 'Nu m-am putut conecta la Shopify.');
   } else {
     state.catalog = { domain: r.domain, blogs: r.blogs || [], collections: r.collections || [] };
-    if (!state.catalog.blogs.length) state.catalogErr = 'Magazinul nu are niciun blog. Creează unul în Shopify → Online Store → Blog posts → Manage blogs.';
+    if (r.blogsError) state.catalogErr = /permisiuni/.test(r.blogsError)
+      ? 'Aplicației Shopify îi lipsesc permisiunile pentru blog (write_content și read_content). Adaugă-le în Dev Dashboard → aplicația → versiune nouă → Release, apoi acceptă actualizarea în magazin.'
+      : r.blogsError;
+    else if (!state.catalog.blogs.length) state.catalogErr = 'Magazinul nu are niciun blog. Creează unul în Shopify → Online Store → Blog posts → Manage blogs.';
   }
   if (state.view === 'edit') {
     ensureBlog();
-    const sel = $('#f-coll'); if (sel) sel.innerHTML = collOptions();
+    const sel = $('#f-coll'); if (sel && state.catalog?.collections?.length) sel.innerHTML = collOptions();
     updateSide();
   }
 }
@@ -656,7 +671,8 @@ $('#view').addEventListener('change', e => {
   else if (id === 'f-blog') p.blog_id = e.target.value;
   else if (id === 'f-handle') { e.target.value = p.handle; }
   else if (id === 'f-coll') {
-    const c = (state.catalog?.collections || []).find(x => x.handle === e.target.value);
+    const list = state.catalog?.collections?.length ? state.catalog.collections : COLLECTIONS.map(t => ({ title: t, handle: slugify(t) }));
+    const c = list.find(x => x.handle === e.target.value);
     p.link_collection = c ? { title: c.title, handle: c.handle } : null;
   } else return;
   queueSave();
@@ -681,6 +697,10 @@ $('#view').addEventListener('click', async e => {
   const t = e.target, p = state.cur;
   const cmd = t.closest('[data-cmd]')?.dataset.cmd;
   if (cmd) return runCmd(cmd);
+  const spotEl = t.closest('#ed .tfs-loc-poza');
+  if (spotEl) { e.preventDefault(); return insertImage(spotEl); }
+  const fig = t.closest('#ed figure');
+  if (fig) { e.preventDefault(); return editFigure(fig); }
   const card = t.closest('#ed .tfs-produs');
   if (card) {
     e.preventDefault();
@@ -697,6 +717,7 @@ $('#view').addEventListener('click', async e => {
   if (act === 'del-post') return deletePost(p);
   if (act === 'find-prod') { const pr = await findProduct('Produse de recomandat'); if (pr) addProduct(pr); return; }
   if (act === 'insert-prod') return insertProduct();
+  if (act === 'insert-img') return insertImage();
   if (act === 'pick-img') return pickImage();
   if (act === 'generate') return generate();
   if (act === 'publish') return publish();
@@ -785,22 +806,28 @@ async function insertProduct() {
   const pr = await findProduct('Pune un produs în articol');
   if (!pr) return;
   addProduct(pr);
-  const ed = $('#ed');
-  const tmp = document.createElement('div');
-  tmp.innerHTML = productCard(pr);
-  const card = tmp.firstChild;
-  // după paragraful în care era cursorul (sau la final)
-  let block = range && ed.contains(range.startContainer) ? range.startContainer : null;
-  while (block && block.parentNode !== ed) block = block.parentNode;
-  if (block) block.after(card); else ed.appendChild(card);
-  if (!card.nextSibling) { const p = document.createElement('p'); p.innerHTML = '<br>'; card.after(p); }
+  state.range = range;
+  placeAfterCursor(nodeFrom(productCard(pr)));
   queueSave(); updateSide();
   toast('Produsul a fost pus în articol.');
 }
 
-async function pickImage() {
+/** Încarcă o poză de pe calculator/telefon (inclusiv HEIC) în Supabase și întoarce adresa publică. */
+async function uploadImage(file) {
+  const dec = await decode(file);
+  const alpha = hasAlpha(dec);
+  const m = await makeMaster(file, dec, alpha);
+  const base = slugify(file.name.replace(/\.[^.]+$/, '')) || 'poza';
+  const path = `blog/${monthKey(new Date())}/${base}-${Math.random().toString(36).slice(2, 7)}.${m.ext}`;
+  const { error } = await sb.storage.from(CFG.BUCKET).upload(path, m.blob, { contentType: m.mime, upsert: false });
+  if (error) throw new Error('Nu am putut încărca poza.');
+  return { url: publicUrl(path), label: file.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ') };
+}
+
+/** Alegerea unei poze: din produsele articolului, din pozele aplicației sau încărcată acum. */
+async function chooseImage({ title, removable = false }) {
   if (!state.assets) {
-    const { data } = await sb.from('assets').select('id,title,thumb_path,master_path,created_at').order('created_at', { ascending: false }).limit(60);
+    const { data } = await sb.from('assets').select('id,title,thumb_path,master_path,created_at').order('created_at', { ascending: false }).limit(80);
     state.assets = data || [];
   }
   const fromProducts = (state.cur.products || []).filter(p => p.image).map(p => ({ thumb: sizedImg(p.image, 300), url: p.image, label: p.title }));
@@ -808,24 +835,100 @@ async function pickImage() {
   const all = [...fromProducts, ...fromAssets];
   const tile = (x, i) => `<button type="button" data-i="${i}" class="aspect-square rounded-xl overflow-hidden border border-line hover:ring-2 hover:ring-moss/40" title="${esc(x.label)}"><img src="${esc(x.thumb)}" alt="${esc(x.label)}" loading="lazy" class="w-full h-full object-cover" /></button>`;
   let chosen = null;
-  const r = await ask({
-    title: 'Alege poza principală', ok: 'Închide', hideOk: true,
-    body: all.length ? `<div class="max-h-[60vh] overflow-y-auto pr-1">
-        ${fromProducts.length ? `<p class="text-xs text-muted mb-2">Din produsele alese</p><div class="grid grid-cols-3 sm:grid-cols-4 gap-2 mb-4">${fromProducts.map((x, i) => tile(x, i)).join('')}</div>` : ''}
+  return ask({
+    title, ok: 'Închide', hideOk: true,
+    body: `<label class="flex items-center justify-center gap-2 w-full min-h-[48px] rounded-xl border-2 border-dashed border-moss/40 bg-moss-soft text-moss-dark text-sm font-semibold cursor-pointer hover:bg-moss-soft/70 mb-4">
+        <input type="file" accept="image/*,.heic,.heif" class="sr-only" data-upload />
+        <span data-up-label>⬆ Încarcă o poză de pe calculator sau telefon</span></label>
+      <div class="max-h-[52vh] overflow-y-auto pr-1">
+        ${fromProducts.length ? `<p class="text-xs text-muted mb-2">Din produsele alese pentru articol</p><div class="grid grid-cols-3 sm:grid-cols-4 gap-2 mb-4">${fromProducts.map((x, i) => tile(x, i)).join('')}</div>` : ''}
         ${fromAssets.length ? `<p class="text-xs text-muted mb-2">Pozele încărcate în aplicație</p><div class="grid grid-cols-3 sm:grid-cols-4 gap-2">${fromAssets.map((x, i) => tile(x, i + fromProducts.length)).join('')}</div>` : ''}
-        ${state.cur.image_url ? '<button type="button" data-none class="mt-4 text-sm text-blush-dark hover:underline">Scoate poza</button>' : ''}</div>`
-      : '<p class="text-sm text-muted">Nu ai încă poze. Alege mai întâi un produs de recomandat (pozele lui apar aici) sau încarcă poze din secțiunea Produse.</p>',
-    onOpen: (b, dlg) => b.addEventListener('click', e => {
-      const t = e.target.closest('[data-i]');
-      if (t) { chosen = all[Number(t.dataset.i)]; dlg.close('ok'); }
-      if (e.target.closest('[data-none]')) { chosen = { url: null }; dlg.close('ok'); }
-    }),
+        ${!all.length ? '<p class="text-sm text-muted">Încă nu ai poze aici. Încarcă una sau alege un produs de recomandat (pozele lui apar aici).</p>' : ''}
+        ${removable ? '<button type="button" data-none class="mt-4 text-sm text-blush-dark hover:underline">Scoate poza</button>' : ''}</div>`,
+    onOpen: (b, dlg) => {
+      b.addEventListener('click', e => {
+        const t = e.target.closest('[data-i]');
+        if (t) { chosen = all[Number(t.dataset.i)]; dlg.close('ok'); }
+        if (e.target.closest('[data-none]')) { chosen = { url: null }; dlg.close('ok'); }
+      });
+      $('[data-upload]', b).addEventListener('change', async e => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        const lab = $('[data-up-label]', b);
+        lab.innerHTML = `${spinner} Încarc poza…`;
+        try { chosen = await uploadImage(f); dlg.close('ok'); }
+        catch (err) { lab.textContent = err.message || 'Nu am putut încărca poza.'; }
+      });
+    },
     collect: () => chosen,
   });
+}
+
+async function pickImage() {
+  const r = await chooseImage({ title: 'Alege poza principală', removable: !!state.cur.image_url });
   if (!r) return;
   state.cur.image_url = r.url;
   if (r.url && !state.cur.image_alt?.trim() && r.label) state.cur.image_alt = r.label;
   $('#img-box').innerHTML = imgHtml();
+  queueSave(); updateSide();
+}
+
+// ---------------------------------------------------------------- poze în text
+function figureHtml({ url, alt, caption }) {
+  return `<figure class="tfs-poza" contenteditable="false" style="margin:28px 0;">`
+    + `<img src="${esc(sizedImg(url, 1600))}" alt="${esc(alt)}" loading="lazy" style="display:block;width:auto;max-width:100%;height:auto;max-height:720px;margin:0 auto;border-radius:12px;">`
+    + (caption ? `<figcaption style="margin-top:8px;font-size:14px;opacity:.7;text-align:center;">${esc(caption)}</figcaption>` : '')
+    + `</figure>`;
+}
+/** Text alternativ + legendă pentru o poză din text. */
+async function askImageDetails({ alt = '', caption = '', editing = false }) {
+  let removed = false;
+  const r = await ask({
+    title: editing ? 'Poza din text' : 'Detalii poză', ok: editing ? 'Salvează' : 'Pune în articol',
+    body: `<div class="space-y-3">
+      ${field('Text alternativ — ce se vede în poză (ajută la Google)', `<input name="alt" class="${inputCls}" maxlength="140" value="${esc(alt)}" placeholder="Ex: buchet de trandafiri roz în ambalaj kraft" />`)}
+      ${field('Legendă sub poză (opțional)', `<input name="caption" class="${inputCls}" maxlength="160" value="${esc(caption)}" />`)}
+      ${editing ? '<div class="flex gap-4 pt-1"><button type="button" data-swap class="text-sm text-moss hover:underline">Schimbă poza</button><button type="button" data-remove class="text-sm text-blush-dark hover:underline">Scoate poza</button></div>' : ''}</div>`,
+    onOpen: (b, dlg) => {
+      $('[name=alt]', b).focus();
+      b.addEventListener('click', e => {
+        if (e.target.closest('[data-remove]')) { removed = 'remove'; dlg.close('ok'); }
+        if (e.target.closest('[data-swap]')) { removed = 'swap'; dlg.close('ok'); }
+      });
+    },
+    collect: b => ({ alt: $('[name=alt]', b).value.trim(), caption: $('[name=caption]', b).value.trim(), action: removed }),
+  });
+  return r;
+}
+function placeAfterCursor(node) {
+  const ed = $('#ed'), range = state.range;
+  let block = range && ed.contains(range.startContainer) ? range.startContainer : null;
+  while (block && block.parentNode !== ed) block = block.parentNode;
+  if (block) block.after(node); else ed.appendChild(node);
+  if (!node.nextSibling) { const p = document.createElement('p'); p.innerHTML = '<br>'; node.after(p); }
+}
+const nodeFrom = html => { const t = document.createElement('div'); t.innerHTML = html; return t.firstChild; };
+
+async function insertImage(target = null) {
+  const img = await chooseImage({ title: target ? 'Alege poza pentru acest loc' : 'Pune o poză în articol' });
+  if (!img?.url) return;
+  const d = await askImageDetails({ alt: target?.dataset.desc || img.label || '' });
+  if (!d) return;
+  const fig = nodeFrom(figureHtml({ url: img.url, alt: d.alt || state.cur.title, caption: d.caption }));
+  if (target) target.replaceWith(fig); else placeAfterCursor(fig);
+  queueSave(); updateSide();
+}
+async function editFigure(fig) {
+  const img = fig.querySelector('img');
+  const d = await askImageDetails({ alt: img?.alt || '', caption: fig.querySelector('figcaption')?.textContent || '', editing: true });
+  if (!d) return;
+  if (d.action === 'remove') { fig.remove(); }
+  else if (d.action === 'swap') {
+    const n = await chooseImage({ title: 'Alege altă poză' });
+    if (n?.url) fig.replaceWith(nodeFrom(figureHtml({ url: n.url, alt: img?.alt || n.label || '', caption: fig.querySelector('figcaption')?.textContent || '' })));
+  } else {
+    fig.replaceWith(nodeFrom(figureHtml({ url: img.getAttribute('src'), alt: d.alt || state.cur.title, caption: d.caption })));
+  }
   queueSave(); updateSide();
 }
 
@@ -880,12 +983,18 @@ async function publish() {
       if (!ok) return;
     }
   }
+  const spots = $$('#ed .tfs-loc-poza').length;
+  if (spots) {
+    const ok = await ask({ title: `Mai ai ${spots} ${spots === 1 ? 'loc de poză necompletat' : 'locuri de poze necompletate'}`, ok: 'Trimite fără ele',
+      body: '<p class="text-sm text-muted">Locurile marcate „Aici merge o poză” nu apar pe site — se scot la trimitere. Poți să le completezi acum (click pe ele) sau să trimiți așa.</p>' });
+    if (!ok) return;
+  }
   state.publishing = true; updateSide();
   clearTimeout(state.saveTimer); state.saveTimer = null;
   await savePost(p);
   const r = await callFn('shopify-publish', { action: 'article', article: {
     articleId: p.shopify_article_id, blogId: p.blog_id, title: p.title.trim(), handle: p.handle,
-    bodyHtml: p.body_html, summaryHtml: p.summary?.trim() ? `<p>${esc(p.summary.trim())}</p>` : '',
+    bodyHtml: cleanBody(true), summaryHtml: p.summary?.trim() ? `<p>${esc(p.summary.trim())}</p>` : '',
     author: AUTHOR, tags: [p.theme].filter(Boolean), isPublished: !!p.publish_live,
     seoTitle: p.seo_title || p.title, seoDescription: p.seo_description,
     image: p.image_url ? { url: p.image_url, alt: p.image_alt || p.title } : null,
