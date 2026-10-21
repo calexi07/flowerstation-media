@@ -102,6 +102,7 @@ const state = {
   posts: [],
   missingTable: false,
   filter: 'Toate',
+  prioOnly: false,     // doar articolele esențiale din calendar
   view: 'plan',
   cur: null,
   catalog: null,       // { domain, blogs, collections } din Shopify
@@ -160,6 +161,8 @@ async function loadPosts() {
     state.canSchedule = !probe.error;
     const probe2 = await sb.from('blog_posts').select('faq,show_toc').limit(1);
     state.canFaq = !probe2.error;
+    const probe3 = await sb.from('blog_posts').select('priority,due_date').limit(1);
+    state.canPriority = !probe3.error;
   }
   // articolele programate a căror oră a trecut sunt acum publicate
   for (const p of state.posts) if (p.status === 'scheduled' && p.scheduled_at && new Date(p.scheduled_at) <= new Date()) p.status = 'published';
@@ -168,7 +171,7 @@ async function loadPosts() {
 const SAVE_FIELDS = ['title', 'keyword', 'theme', 'month', 'collection', 'status', 'notes', 'body_html', 'summary', 'handle',
   'seo_title', 'seo_description', 'products', 'link_collection', 'image_url', 'image_alt', 'publish_live', 'blog_id',
   'shopify_article_id', 'shopify_admin_url', 'shopify_url', 'shopify_image_key', 'published_at'];
-const saveFields = () => [...SAVE_FIELDS, ...(state.canSchedule ? ['scheduled_at'] : []), ...(state.canFaq ? ['faq', 'show_toc'] : [])];
+const saveFields = () => [...SAVE_FIELDS, ...(state.canSchedule ? ['scheduled_at'] : []), ...(state.canFaq ? ['faq', 'show_toc'] : []), ...(state.canPriority ? ['priority', 'due_date'] : [])];
 
 async function savePost(p) {
   const row = Object.fromEntries(saveFields().map(k => [k, p[k] ?? null]));
@@ -236,6 +239,45 @@ const statusOf = p => {
   return s;
 };
 
+// ---------------------------------------------------------------- prioritate + termen (calendarul de conținut)
+const PRIO = {
+  esential: { label: 'Esențial', rank: 0, cls: 'bg-blush-soft text-blush-dark' },
+  important: { label: 'Important', rank: 1, cls: 'bg-[#F8E7D2] text-[#7A4510]' },
+  optional: { label: 'Opțional', rank: 2, cls: 'bg-[#EFE9DF] text-[#4F4840]' },
+};
+const prioRank = p => PRIO[p.priority]?.rank ?? 3;
+const prioBadge = p => PRIO[p.priority] ? `<span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${PRIO[p.priority].cls}">${PRIO[p.priority].label}</span>` : '';
+const isDone = p => p.status === 'published' || p.status === 'scheduled';
+const dayDiff = d => Math.round((new Date(d + 'T00:00:00') - new Date(new Date().toDateString())) / 864e5);
+const fmtDay = d => new Date(d + 'T00:00:00').toLocaleDateString('ro-RO', { day: 'numeric', month: 'short' });
+/** text + culoare pentru termen: „în 5 zile”, „azi”, „întârziat 3 zile” */
+function dueInfo(p) {
+  if (!p.due_date) return null;
+  if (isDone(p)) return { text: fmtDay(p.due_date), cls: 'text-muted' };
+  const n = dayDiff(p.due_date);
+  if (n < 0) return { text: `întârziat ${-n} ${-n === 1 ? 'zi' : 'zile'}`, cls: 'text-blush-dark font-semibold' };
+  if (n === 0) return { text: 'azi', cls: 'text-blush-dark font-semibold' };
+  if (n <= 14) return { text: `în ${n} ${n === 1 ? 'zi' : 'zile'} · ${fmtDay(p.due_date)}`, cls: 'text-[#7A4510] font-semibold' };
+  return { text: fmtDay(p.due_date), cls: 'text-muted' };
+}
+const byPrio = (a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999') || prioRank(a) - prioRank(b);
+
+/** Caseta de sus: ce trebuie scris acum, după termen. */
+function nextUpHtml() {
+  if (!state.canPriority) return '';
+  const todo = state.posts.filter(p => p.due_date && !isDone(p) && dayDiff(p.due_date) <= 30)
+    .sort((a, b) => a.due_date.localeCompare(b.due_date) || prioRank(a) - prioRank(b)).slice(0, 6);
+  if (!todo.length) return '';
+  return `<section class="mb-6 bg-paper border border-line rounded-2xl p-5">
+    <h2 class="font-serif text-xl mb-1">De scris acum</h2>
+    <p class="text-xs text-muted mb-3">Articolele din calendar cu termen în următoarele 30 de zile. Termenul e data la care articolul trebuie să fie pe site.</p>
+    <ul class="divide-y divide-line">${todo.map(p => { const d = dueInfo(p); return `
+      <li><a href="#post/${p.id}" style="gap:4px 12px" class="flex flex-wrap items-center py-2.5 hover:bg-cream/60 -mx-2 px-2 rounded-lg">
+        ${prioBadge(p)}<span class="font-medium min-w-0" style="flex:1 1 240px">${esc(p.title || p.keyword)}</span>
+        <span class="text-xs ${d.cls}">${esc(d.text)}</span><span class="text-sm font-semibold text-moss">${statusOf(p).action}</span></a></li>`; }).join('')}</ul>
+  </section>`;
+}
+
 function renderPlan() {
   const v = $('#view');
   if (state.missingTable) {
@@ -244,13 +286,14 @@ function renderPlan() {
       <p class="text-sm text-muted">Tabelul pentru articole nu există încă. Rulează fișierul <b>supabase/migrare-09-blog.sql</b> în Supabase → SQL Editor, apoi reîncarcă pagina.</p></div>`;
     return;
   }
-  const list = state.posts.filter(p => state.filter === 'Toate' || p.theme === state.filter);
+  const list = state.posts.filter(p => (state.filter === 'Toate' || p.theme === state.filter) && (!state.prioOnly || p.priority === 'esential'));
   const groups = new Map();
   for (const p of [...list].sort((a, b) => (a.month || '9999').localeCompare(b.month || '9999'))) {
     const k = p.month || '';
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(p);
   }
+  for (const rows of groups.values()) rows.sort(byPrio);
   const counts = { idea: 0, draft: 0, scheduled: 0, published: 0 };
   state.posts.forEach(p => { counts[p.status] = (counts[p.status] || 0) + 1; });
 
@@ -265,8 +308,10 @@ function renderPlan() {
     <button data-act="ai-ideas" ${state.thinkingIdeas ? 'disabled' : ''} class="inline-flex items-center gap-2 rounded-full bg-moss hover:bg-moss-dark text-white px-4 py-2.5 text-sm font-medium disabled:opacity-60">
       ${state.thinkingIdeas ? spinner + ' Caut idei…' : sparkle + ' Propune 10 idei cu AI'}</button>
   </div>
+  ${nextUpHtml()}
   <div class="flex flex-wrap gap-2 mb-6" role="group" aria-label="Filtru temă">
     ${['Toate', ...themes()].map(t => `<button data-filter="${esc(t)}" aria-pressed="${state.filter === t}" class="rounded-full px-3.5 py-2 text-sm ${state.filter === t ? 'bg-ink text-white' : 'bg-paper border border-line hover:bg-cream'}">${esc(t)}</button>`).join('')}
+    ${state.canPriority ? `<button data-act="prio-only" aria-pressed="${state.prioOnly}" class="sm:ml-auto rounded-full px-3.5 py-2 text-sm ${state.prioOnly ? 'bg-blush-dark text-white' : 'bg-paper border border-line hover:bg-cream'}">Doar esențiale</button>` : ''}
   </div>
   ${groups.size ? [...groups].map(([m, rows]) => `
     <section class="mb-6">
@@ -274,13 +319,15 @@ function renderPlan() {
       <div class="bg-paper border border-line rounded-2xl overflow-x-auto">
         <table class="w-full min-w-[760px] text-sm">
           <thead><tr class="text-left text-xs text-muted">
-            <th class="px-4 py-3 font-semibold w-[40%]">Articol</th><th class="px-3 py-3 font-semibold">Expresia căutată</th>
+            <th class="px-4 py-3 font-semibold w-[38%]">Articol</th><th class="px-3 py-3 font-semibold">Expresia căutată</th>
+            ${state.canPriority ? '<th class="px-3 py-3 font-semibold">Pe site până pe</th>' : ''}
             <th class="px-3 py-3 font-semibold">Temă</th><th class="px-3 py-3 font-semibold">Duce spre</th>
             <th class="px-4 py-3 font-semibold text-right">Stare</th></tr></thead>
           <tbody>${rows.map(p => { const s = statusOf(p); return `
             <tr class="border-t border-line hover:bg-cream/60 cursor-pointer" data-open="${p.id}">
-              <td class="px-4 py-3 font-medium">${esc(p.title) || '<span class="text-muted">(fără titlu)</span>'}</td>
+              <td class="px-4 py-3 font-medium">${prioBadge(p) ? `<div class="mb-1">${prioBadge(p)}</div>` : ''}${esc(p.title) || '<span class="text-muted">(fără titlu)</span>'}</td>
               <td class="px-3 py-3 text-muted">${esc(p.keyword)}</td>
+              ${state.canPriority ? `<td class="px-3 py-3 whitespace-nowrap text-xs ${dueInfo(p)?.cls || ''}">${esc(dueInfo(p)?.text || '')}</td>` : ''}
               <td class="px-3 py-3">${esc(p.theme)}</td>
               <td class="px-3 py-3 text-muted">${esc(p.collection || p.link_collection?.title || '')}</td>
               <td class="px-4 py-3 text-right whitespace-nowrap">
@@ -308,6 +355,7 @@ $('#view').addEventListener('click', async e => {
   const act = t.closest('[data-act]')?.dataset.act;
   if (act === 'new-idea') return newIdea();
   if (act === 'ai-ideas') return aiIdeas();
+  if (act === 'prio-only') { state.prioOnly = !state.prioOnly; return renderPlan(); }
   const row = t.closest('[data-open]');
   if (row) location.hash = `#post/${row.dataset.open}`;
 });
@@ -736,6 +784,10 @@ function renderEditor() {
           ${field('Temă', `<select id="f-theme" class="${inputCls}">${themeOptions(p.theme)}</select>`)}
           ${field('Luna', `<select id="f-month" class="${inputCls}"><option value="">fără lună</option>${[...new Set([...(p.month ? [p.month] : []), ...nextMonths(8)])].sort().map(m => `<option value="${m}" ${m === p.month ? 'selected' : ''}>${esc(monthLabel(m))}</option>`).join('')}</select>`)}
         </div>
+        ${state.canPriority ? `<div class="grid grid-cols-2 gap-3">
+          ${field('Prioritate', `<select id="f-prio" class="${inputCls}"><option value="">fără</option>${Object.entries(PRIO).map(([k, v]) => `<option value="${k}" ${k === p.priority ? 'selected' : ''}>${v.label}</option>`).join('')}</select>`)}
+          ${field('Pe site până pe', `<input id="f-due" type="date" class="${inputCls}" value="${esc(p.due_date || '')}" />`)}
+        </div>` : ''}
         ${field('Titlul articolului', `<input id="f-title" class="${inputCls} !text-lg font-serif" value="${esc(p.title)}" placeholder="Ex: Flori de aniversare: cum alegi buchetul potrivit" />`)}
         <div class="grid sm:grid-cols-2 gap-4">
           <div><p class="text-sm font-medium mb-1.5">Produse de recomandat în articol</p><div id="prod-chips" class="flex flex-wrap gap-1.5">${chipsHtml()}</div></div>
@@ -794,14 +846,14 @@ function renderEditor() {
   loadCatalog();
   refreshCards();
   loadPostGsc();
-  socialStatus().then(renderSocialBox);
+  renderSocialBox();
 }
 
 function renderGenBtn() {
   const b = $('#gen-btn');
   if (!b) return;
   b.disabled = state.generating;
-  b.innerHTML = state.generating ? `${spinner} Scriu ciorna… (până la un minut)` : `${sparkle} ${wordCount() > 30 ? 'Generează din nou' : 'Generează ciornă'}`;
+  b.innerHTML = state.generating ? `${spinner} ${state.genStep || 'Scriu ciorna…'} (până la un minut)` : `${sparkle} ${wordCount() > 30 ? 'Generează din nou' : 'Generează ciornă'}`;
 }
 
 function updateSide() {
@@ -882,6 +934,13 @@ $('#view').addEventListener('change', e => {
     p.theme = e.target.value;
   }
   else if (id === 'f-month') p.month = e.target.value || null;
+  else if (id === 'f-prio') p.priority = e.target.value || null;
+  else if (id === 'f-due') { p.due_date = e.target.value || null; if (p.due_date) {
+    p.month = p.due_date.slice(0, 7);
+    const sel = $('#f-month');
+    if (sel && ![...sel.options].some(o => o.value === p.month)) sel.add(new Option(monthLabel(p.month), p.month));
+    if (sel) sel.value = p.month;
+  } }
   else if (id === 'f-blog') p.blog_id = e.target.value;
   else if (id === 'f-when') p.scheduled_at = e.target.value ? new Date(e.target.value).toISOString() : null;
   else if (id === 'f-handle') { e.target.value = p.handle; }
@@ -1207,13 +1266,17 @@ async function renderSocialBox() {
   const box = $('#social-box'), p = state.cur;
   if (!box) return;
   const st = state.social;
-  const { data: hist } = await sb.from('social_posts').select('*').eq('post_id', p.id).order('created_at', { ascending: false });
+  let hist = [];
+  if (st?.connected) {
+    const { data, error } = await sb.from('social_posts').select('*').eq('post_id', p.id).order('created_at', { ascending: false });
+    if (!error) hist = data || [];
+  }
   if (state.cur !== p || !$('#social-box')) return;
   const btn = n => `<button data-social="${n}" class="flex-1 min-h-[44px] rounded-full text-white text-sm font-semibold inline-flex items-center justify-center gap-2 hover:opacity-90" style="background:${NET[n].color}">${NET[n].icon} ${NET[n].name}</button>`;
   box.innerHTML = `<h2 class="font-semibold mb-1">Publică pe rețele</h2>
     <p class="text-xs text-muted mb-3">AI-ul scrie postarea din articol; tu o verifici, alegi poza și publici direct.</p>
     <div class="flex gap-2">${btn('facebook')}${btn('instagram')}</div>
-    <p class="text-xs text-muted mt-2">${st?.connected ? `Conectat: ${esc(st.page)}${st.instagram ? ` · @${esc(st.instagram)}` : ' · Instagram nelegat'} · <button data-act="social-disconnect" class="underline hover:text-ink">deconectează</button>` : st ? 'Facebook nu e conectat încă — te ghidez la primul click.' : ''}</p>
+    <p class="text-xs text-muted mt-2">${st?.connected ? `Conectat: ${esc(st.page)}${st.instagram ? ` · @${esc(st.instagram)}` : ' · Instagram nelegat'} · <button data-act="social-disconnect" class="underline hover:text-ink">deconectează</button>` : 'La primul click te ghidez să conectezi pagina.'}</p>
     ${(hist || []).length ? `<ul class="mt-3 space-y-1 text-sm">${hist.map(h => `<li class="flex justify-between gap-2"><span>${NET[h.network]?.name || h.network} · ${esc(fmtWhen(h.created_at))}</span>${h.url ? `<a href="${esc(h.url)}" target="_blank" rel="noopener" class="text-moss font-medium hover:underline">Vezi ↗</a>` : ''}</li>`).join('')}</ul>` : ''}`;
 }
 
@@ -1365,6 +1428,8 @@ async function openSocial(network) {
     },
   });
 }
+
+const stripMeta = r => { const { ok, problems, warnings, ...rest } = r; return rest; };
 
 // ---------------------------------------------------------------- carduri de produs vechi → stilul nou
 /** Cardurile puse înainte de noul design (sau cu preț vechi) se refac cu datele actuale din Shopify. */
@@ -1522,10 +1587,26 @@ async function generate() {
   state.generating = true; renderGenBtn();
   await autoPick(p);
   const firstGen = p.status === 'idea' || wordCount() <= 30;
-  const r = await callFn('blog-ai', { action: 'draft', post: { themes: themes(), links: linkTargets(), keyword: p.keyword, title: p.title, theme: p.theme, notes: p.notes, products: p.products || [], collection: p.link_collection } });
-  state.generating = false;
+  const post = { themes: themes(), links: linkTargets(), keyword: p.keyword, title: p.title, theme: p.theme, notes: p.notes, products: p.products || [], collection: p.link_collection };
+  // fiecare pas e o cerere separată (limita de timp a funcțiilor): scriere → până la 2 revizuiri → întrebări frecvente
+  let r = null;
+  for (let step = 1; step <= 3; step++) {
+    state.genStep = step === 1 ? 'Scriu ciorna…' : `Îmbunătățesc ciorna (${step - 1}/2)…`;
+    renderGenBtn();
+    const prev = r && r.ok ? r : null;
+    const next = await callFn('blog-ai', { action: 'draft', post: prev ? { ...post, previous: stripMeta(prev), problems: prev.problems } : post });
+    if (!next.ok) { if (prev) break; r = next; break; }
+    r = next;
+    if (!r.problems?.length) break;
+  }
+  if (r?.ok && (!Array.isArray(r.faq) || r.faq.filter(f => f?.q && f?.a).length < 4)) {
+    state.genStep = 'Scriu întrebările frecvente…'; renderGenBtn();
+    const f = await callFn('blog-ai', { action: 'faq', post: { title: r.title, keyword: p.keyword, text: String(r.body_html || '').replace(/<[^>]+>/g, ' ') } });
+    if (f.ok && f.faq?.length) r.faq = [...(r.faq || []), ...f.faq].filter((x, i, all) => x?.q && all.findIndex(y => y.q === x.q) === i).slice(0, 6);
+  }
+  state.generating = false; state.genStep = '';
   if (state.cur !== p || state.view !== 'edit') return;
-  if (!r.ok) { renderGenBtn(); return toast(r.error || 'AI-ul nu a răspuns.', 'err'); }
+  if (!r?.ok) { renderGenBtn(); return toast(r?.error || 'AI-ul nu a răspuns.', 'err'); }
   Object.assign(p, {
     title: r.title || p.title,
     seo_title: r.seo_title || '',
