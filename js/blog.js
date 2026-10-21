@@ -5,6 +5,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import * as CFG from './config.js';
 import { decode, hasAlpha, makeMaster } from './images.js';
+import * as TK from './blog-tasks.js';
 
 const sb = createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const AUTHOR = CFG.BLOG_AUTHOR ?? 'The Flower Station';
@@ -102,6 +103,7 @@ const state = {
   posts: [],
   missingTable: false,
   filter: 'Toate',
+  campaigns: [],       // ocaziile mari (Crăciun, Valentine's…) cu planul lor de promovare
   prioOnly: false,     // doar articolele esențiale din calendar
   view: 'plan',
   cur: null,
@@ -163,6 +165,10 @@ async function loadPosts() {
     state.canFaq = !probe2.error;
     const probe3 = await sb.from('blog_posts').select('priority,due_date').limit(1);
     state.canPriority = !probe3.error;
+    const probe4 = await sb.from('blog_posts').select('tasks,occasions,campaign_id').limit(1);
+    const camps = await sb.from('blog_campaigns').select('*').order('occasion_date', { ascending: true });
+    state.canTasks = !probe4.error && !camps.error;
+    state.campaigns = camps.data || [];
   }
   // articolele programate a căror oră a trecut sunt acum publicate
   for (const p of state.posts) if (p.status === 'scheduled' && p.scheduled_at && new Date(p.scheduled_at) <= new Date()) p.status = 'published';
@@ -171,12 +177,13 @@ async function loadPosts() {
 const SAVE_FIELDS = ['title', 'keyword', 'theme', 'month', 'collection', 'status', 'notes', 'body_html', 'summary', 'handle',
   'seo_title', 'seo_description', 'products', 'link_collection', 'image_url', 'image_alt', 'publish_live', 'blog_id',
   'shopify_article_id', 'shopify_admin_url', 'shopify_url', 'shopify_image_key', 'published_at'];
-const saveFields = () => [...SAVE_FIELDS, ...(state.canSchedule ? ['scheduled_at'] : []), ...(state.canFaq ? ['faq', 'show_toc'] : []), ...(state.canPriority ? ['priority', 'due_date'] : [])];
+const saveFields = () => [...SAVE_FIELDS, ...(state.canSchedule ? ['scheduled_at'] : []), ...(state.canFaq ? ['faq', 'show_toc'] : []), ...(state.canPriority ? ['priority', 'due_date'] : []), ...(state.canTasks ? ['tasks', 'occasions', 'campaign_id'] : [])];
 
 async function savePost(p) {
   const row = Object.fromEntries(saveFields().map(k => [k, p[k] ?? null]));
   for (const k of ['title', 'keyword', 'body_html', 'summary', 'handle', 'seo_title', 'seo_description', 'image_alt']) row[k] ??= '';
   row.products ??= [];
+  if ('tasks' in row) { row.tasks ??= {}; row.occasions ??= []; }
   if ('faq' in row) { row.faq = (row.faq || []).filter(f => f && (f.q || f.a)); row.show_toc = row.show_toc !== false; }
   row.publish_live = !!row.publish_live;
   row.theme ||= BASE_THEMES[0];
@@ -216,6 +223,10 @@ function route() {
   const p = m && state.posts.find(x => x.id === m[1]);
   if (p) { state.view = 'edit'; state.cur = p; renderEditor(); }
   else if (location.hash === '#google') { state.view = 'google'; state.cur = null; renderGoogle(); }
+  else if (location.hash === '#campanii') { state.view = 'camps'; state.cur = null; renderCampaigns(); }
+  else if (/^#camp\//.test(location.hash) && state.campaigns.some(c => c.id === location.hash.slice(6))) {
+    state.view = 'camp'; state.cur = null; state.camp = state.campaigns.find(c => c.id === location.hash.slice(6)); renderCampaign();
+  }
   else { state.view = 'plan'; state.cur = null; renderPlan(); }
   window.scrollTo(0, 0);
 }
@@ -308,7 +319,7 @@ function renderPlan() {
     <button data-act="ai-ideas" ${state.thinkingIdeas ? 'disabled' : ''} class="inline-flex items-center gap-2 rounded-full bg-moss hover:bg-moss-dark text-white px-4 py-2.5 text-sm font-medium disabled:opacity-60">
       ${state.thinkingIdeas ? spinner + ' Caut idei…' : sparkle + ' Propune 10 idei cu AI'}</button>
   </div>
-  ${nextUpHtml()}
+  ${state.canTasks ? todoHtml() : nextUpHtml()}
   <div class="flex flex-wrap gap-2 mb-6" role="group" aria-label="Filtru temă">
     ${['Toate', ...themes()].map(t => `<button data-filter="${esc(t)}" aria-pressed="${state.filter === t}" class="rounded-full px-3.5 py-2 text-sm ${state.filter === t ? 'bg-ink text-white' : 'bg-paper border border-line hover:bg-cream'}">${esc(t)}</button>`).join('')}
     ${state.canPriority ? `<button data-act="prio-only" aria-pressed="${state.prioOnly}" class="sm:ml-auto rounded-full px-3.5 py-2 text-sm ${state.prioOnly ? 'bg-blush-dark text-white' : 'bg-paper border border-line hover:bg-cream'}">Doar esențiale</button>` : ''}
@@ -361,8 +372,262 @@ $('#view').addEventListener('click', async e => {
 });
 
 const tabsHtml = cur => `<nav class="flex gap-1 mb-6 border-b border-line" aria-label="Blog">
-  ${[['plan', '#plan', 'Planul de articole'], ['google', '#google', 'Rezultate Google']].map(([k, h, l]) =>
+  ${[['plan', '#plan', 'Planul de articole'], ['camps', '#campanii', 'Campanii'], ['google', '#google', 'Rezultate Google']].map(([k, h, l]) =>
     `<a href="${h}" ${k === cur ? 'aria-current="page"' : ''} class="px-4 py-2.5 -mb-px text-sm border-b-2 ${k === cur ? 'border-ink text-ink font-semibold' : 'border-transparent text-muted hover:text-ink'}">${l}</a>`).join('')}</nav>`;
+
+// ================================================================ PLAN DE LUCRU (sarcini) + CAMPANII
+const campOf = p => p.campaign_id ? state.campaigns.find(c => c.id === p.campaign_id) || null : null;
+const postsOf = c => state.posts.filter(p => p.campaign_id === c.id);
+const tasksFor = p => TK.articleTasks(p, campOf(p));
+const tasksForCamp = c => TK.campaignTasks(c, postsOf(c));
+const allTasks = () => [...state.posts.flatMap(tasksFor), ...state.campaigns.flatMap(tasksForCamp)];
+const PHASES = [
+  ['Cu 4–6 săptămâni înainte', t => t.off <= -21], ['Cu 2–3 săptămâni înainte', t => t.off > -21 && t.off < -7],
+  ['Ultima săptămână', t => t.off >= -7 && t.off <= 0], ['După ocazie', t => t.off > 0],
+];
+
+/** când: „întârziat 3 zile”, „azi”, „mâine”, „joi, 12 nov.” */
+function whenHtml(t) {
+  if (!t.date) return '<span class="text-muted">fără dată</span>';
+  if (t.done) return `<span class="text-muted">${TK.fmtDay(t.date)}</span>`;
+  const n = TK.dayDiff(t.date);
+  if (n < 0) return `<span class="text-blush-dark font-semibold">întârziat ${-n} ${-n === 1 ? 'zi' : 'zile'}</span>`;
+  if (n === 0) return '<span class="text-blush-dark font-semibold">azi</span>';
+  if (n === 1) return '<span class="text-[#7A4510] font-semibold">mâine</span>';
+  if (n <= 7) return `<span class="text-[#7A4510] font-semibold">${esc(TK.fmtDayLong(t.date).split(',')[0])}, ${TK.fmtDay(t.date)}</span>`;
+  return `<span class="text-muted">${TK.fmtDay(t.date)}</span>`;
+}
+function taskRow(t, { src = false } = {}) {
+  const box = t.auto !== null
+    ? `<span title="Se bifează singur, din articol" class="mt-0.5 w-5 h-5 shrink-0 rounded-md grid place-items-center text-[11px] ${t.done ? 'bg-moss text-white' : 'border-2 border-dashed border-[#B9B0A2]'}">${t.done ? '✓' : ''}</span>`
+    : `<input type="checkbox" data-task="${t.src.type}|${t.src.id}|${esc(t.key)}" ${t.done ? 'checked' : ''} class="mt-0.5 w-5 h-5 shrink-0 accent-[#2F5D4A] cursor-pointer" aria-label="${esc(t.text)}">`;
+  const href = t.src.type === 'post' ? `#post/${t.src.id}` : `#camp/${t.src.id}`;
+  return `<li class="flex items-start gap-3 py-2.5">${box}
+    <div class="min-w-0 flex-1">
+      <p class="text-sm ${t.done ? 'line-through text-muted' : ''}">${esc(t.text)}</p>
+      <p class="text-xs text-muted mt-0.5"><span class="font-semibold text-ink/70">${esc(t.ch)}</span> · ${whenHtml(t)}${src ? ` · <a href="${href}" class="underline hover:text-ink">${esc(t.src.name || '(fără titlu)')}</a>` : ''}${t.auto !== null && !t.done ? ' · <span>se bifează singur</span>' : ''}</p>
+    </div></li>`;
+}
+async function toggleTask(type, id, key, on) {
+  const obj = type === 'post' ? state.posts.find(p => p.id === id) : state.campaigns.find(c => c.id === id);
+  if (!obj) return;
+  const old = obj.tasks || {};
+  obj.tasks = { ...old };
+  if (on) obj.tasks[key] = new Date().toISOString(); else delete obj.tasks[key];
+  const { error } = await sb.from(type === 'post' ? 'blog_posts' : 'blog_campaigns').update({ tasks: obj.tasks }).eq('id', id);
+  if (error) { obj.tasks = old; toast('Nu am putut salva bifa.', 'err'); }
+  rerenderTasks();
+}
+function rerenderTasks() {
+  if (state.view === 'plan') renderPlan();
+  else if (state.view === 'camps') renderCampaigns();
+  else if (state.view === 'camp') renderCampaign();
+  else if (state.view === 'edit') renderTasksBox();
+}
+$('#view').addEventListener('change', e => {
+  const cb = e.target.closest('[data-task]');
+  if (!cb) return;
+  const [type, id, key] = cb.dataset.task.split('|');
+  toggleTask(type, id, key, cb.checked);
+});
+
+/** Caseta de sus din plan: tot ce e de făcut în următoarele 7 zile, din articole și campanii. */
+function todoHtml() {
+  const open = allTasks().filter(t => !t.done && t.date && TK.dayDiff(t.date) <= 7).sort((a, b) => a.date.localeCompare(b.date));
+  const late = open.filter(t => TK.dayDiff(t.date) < 0).length;
+  const shown = open.slice(0, 15);
+  let empty = '';
+  if (!open.length) {
+    const next = allTasks().filter(t => !t.done && t.date).sort((a, b) => a.date.localeCompare(b.date))[0];
+    empty = `<p class="text-sm text-muted">Nimic urgent săptămâna asta.${next ? ` Următorul lucru: <b>${esc(next.text)}</b> (${esc(next.src.name || '')}), pe ${TK.fmtDay(next.date)}.` : ''}</p>`;
+  }
+  return `<section class="mb-6 bg-paper border border-line rounded-2xl p-5">
+    <div class="flex flex-wrap items-baseline mb-1" style="gap:4px 12px">
+      <h2 class="font-serif text-xl">De făcut în următoarele 7 zile</h2>
+      ${late ? `<span class="text-xs font-semibold text-blush-dark">${late} întârziate</span>` : ''}
+      <a href="#campanii" class="sm:ml-auto text-sm font-semibold text-moss hover:underline">Campaniile →</a>
+    </div>
+    <p class="text-xs text-muted mb-2">Din articole și din campanii: scris, publicat și promovat pe fiecare canal. Bifezi când e gata; ce ține de articol se bifează singur.</p>
+    ${empty || `<ul class="divide-y divide-line">${shown.map(t => taskRow(t, { src: true })).join('')}</ul>
+    ${open.length > shown.length ? `<p class="text-xs text-muted mt-2">și încă ${open.length - shown.length}. Le vezi în articole și în campanii.</p>` : ''}`}
+  </section>`;
+}
+
+// ---------------------------------------------------------------- caseta din editor
+function renderTasksBox() {
+  const box = $('#tasks-box'), p = state.cur;
+  if (!box || !p) return;
+  if (!state.canTasks) { box.innerHTML = '<h2 class="font-semibold mb-1">Plan de lucru</h2><p class="text-sm text-muted">Pentru lista de pași (scris, publicat, postări pe fiecare canal) rulează <b>migrare-14-blog-campanii.sql</b> în Supabase.</p>'; return; }
+  syncBody();
+  const camp = campOf(p), T = tasksFor(p), pr = TK.progress(T);
+  const occ = (p.occasions || []).filter(o => o?.date).sort((a, b) => a.date.localeCompare(b.date));
+  box.innerHTML = `
+    <div class="flex items-baseline gap-2 mb-1"><h2 class="font-semibold">Plan de lucru</h2><span class="ml-auto text-xs text-muted">${pr.d} din ${pr.n} gata</span></div>
+    <div class="h-1.5 rounded-full bg-[#EFE9DF] mb-3"><div class="h-full rounded-full bg-moss" style="width:${pr.pct}%"></div></div>
+    ${!p.due_date ? '<p class="text-xs text-[#7A4510] mb-2">Alege „Pe site până pe” ca să apară datele fiecărui pas.</p>' : ''}
+    ${state.campaigns.length ? field('Face parte din campania', `<select id="f-camp" class="${inputCls}"><option value="">nicio campanie</option>${state.campaigns.map(c => `<option value="${c.id}" ${c.id === p.campaign_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`) : ''}
+    ${camp ? `<p class="text-xs text-muted mt-2">Promovarea pe canale (rețele, newsletter, reclame, WhatsApp) e în campanie. <a href="#camp/${camp.id}" class="font-semibold text-moss hover:underline">Vezi campania →</a></p>` : `
+    <div class="mt-3">
+      <p class="text-sm font-medium mb-1.5">Ocazii din articol <span class="text-xs text-muted font-normal">(zile de nume, sărbători)</span></p>
+      <div class="flex flex-wrap gap-1.5">${occ.map((o, i) => `<span class="inline-flex items-center gap-1 rounded-full bg-cream border border-line pl-3 pr-1 py-1 text-xs">${esc(o.label || 'Ocazie')} · ${TK.fmtDay(o.date)}<button data-occ-del="${(p.occasions || []).indexOf(o)}" class="w-5 h-5 rounded-full hover:bg-blush-soft hover:text-blush-dark" aria-label="Scoate ocazia">×</button></span>`).join('')}
+        <button data-act="occ-add" class="rounded-full border border-dashed border-[#B9B0A2] text-muted text-xs px-3 py-1.5 hover:bg-cream">+ Ocazie</button></div>
+      ${!occ.length ? '<p class="text-xs text-muted mt-1.5">Fără ocazie, articolul primește promovarea obișnuită: carusel pe Instagram, link pe Facebook și Google Business.</p>' : ''}
+    </div>`}
+    <ul class="divide-y divide-line mt-3">${T.map(t => taskRow(t)).join('')}</ul>`;
+}
+async function addOccasion() {
+  const p = state.cur;
+  const r = await ask({
+    title: 'Adaugă o ocazie', ok: 'Adaugă',
+    body: `<p class="text-sm text-muted mb-3">Pentru fiecare ocazie apar 4 pași: Google Business cu 5 zile înainte, postare pe Facebook și Instagram cu 3 zile înainte, story în ziua dinainte și în ziua respectivă.</p>
+      <div class="grid grid-cols-[1fr_auto] gap-3">
+        ${field('Ce se sărbătorește', `<input name="label" class="${inputCls}" placeholder="Ex: Sf. Nicolae" />`)}
+        ${field('Data', `<input name="date" type="date" class="${inputCls}" />`)}</div>`,
+    collect: b => { const date = $('[name=date]', b).value; if (!date) { toast('Alege data.', 'err'); return false; } return { date, label: $('[name=label]', b).value.trim() }; },
+  });
+  if (!r) return;
+  p.occasions = [...(p.occasions || []), r];
+  queueSave(); renderTasksBox();
+}
+$('#view').addEventListener('click', e => {
+  if (state.view !== 'edit' || !state.cur) return;
+  if (e.target.closest('[data-act=occ-add]')) { e.preventDefault(); return addOccasion(); }
+  const d = e.target.closest('[data-occ-del]');
+  if (d) { e.preventDefault(); const p = state.cur; p.occasions = (p.occasions || []).filter((_, i) => i !== +d.dataset.occDel); queueSave(); renderTasksBox(); }
+});
+
+// ---------------------------------------------------------------- campaniile
+function campCard(c) {
+  const T = tasksForCamp(c), pr = TK.progress(T);
+  const next = T.filter(t => !t.done && t.date).sort((a, b) => a.date.localeCompare(b.date))[0];
+  const late = T.filter(t => !t.done && t.date && TK.dayDiff(t.date) < 0).length;
+  const n = c.occasion_date ? TK.dayDiff(c.occasion_date) : null;
+  const posts = postsOf(c);
+  return `<a href="#camp/${c.id}" class="block bg-paper border border-line rounded-2xl p-5 hover:shadow-[0_4px_18px_rgba(31,26,23,.08)] transition">
+    <div class="flex items-baseline gap-2"><h2 class="font-serif text-xl">${esc(c.name)}</h2>
+      ${n !== null ? `<span class="ml-auto text-xs ${n < 0 ? 'text-muted' : n <= 42 ? 'text-[#7A4510] font-semibold' : 'text-muted'}">${n < 0 ? 'încheiată' : n === 0 ? 'azi' : `peste ${n} zile`}</span>` : ''}</div>
+    <p class="text-sm text-muted mt-0.5">${c.occasion_date ? esc(TK.fmtDayLong(c.occasion_date)) : '<span class="text-[#7A4510]">alege data ocaziei</span>'}${c.order_by ? ` · comenzi până pe ${TK.fmtDay(c.order_by)}` : ''}</p>
+    <div class="h-1.5 rounded-full bg-[#EFE9DF] mt-3"><div class="h-full rounded-full bg-moss" style="width:${pr.pct}%"></div></div>
+    <p class="text-xs text-muted mt-1.5">${pr.d} din ${pr.n} pași gata · ${posts.length} ${posts.length === 1 ? 'articol' : 'articole'}${late ? ` · <span class="text-blush-dark font-semibold">${late} întârziate</span>` : ''}</p>
+    ${next ? `<p class="text-sm mt-3"><span class="text-muted">Urmează:</span> ${esc(next.text)} <span class="text-xs">· ${whenHtml(next)}</span></p>` : ''}
+  </a>`;
+}
+function renderCampaigns() {
+  const v = $('#view');
+  if (!state.canTasks) {
+    v.innerHTML = `${tabsHtml('camps')}<div class="max-w-xl bg-paper border border-line rounded-2xl p-6"><h1 class="font-serif text-2xl mb-2">Mai e un pas</h1>
+      <p class="text-sm text-muted">Rulează <b>supabase/migrare-14-blog-campanii.sql</b> în Supabase → SQL Editor, apoi reîncarcă pagina.</p></div>`;
+    return;
+  }
+  const up = state.campaigns.filter(c => !c.occasion_date || TK.dayDiff(c.occasion_date) >= -7);
+  const past = state.campaigns.filter(c => !up.includes(c));
+  v.innerHTML = `${tabsHtml('camps')}
+    <div class="flex flex-wrap items-end gap-3 mb-5"><div class="flex-[1_1_380px]">
+      <h1 class="font-serif text-3xl tracking-tight mb-1">Campanii</h1>
+      <p class="text-sm text-muted max-w-2xl">Ocaziile mari, fiecare cu drumul ei de 6 săptămâni: pregătire în atelier și în magazin, articolele, apoi postări, newsletter, WhatsApp și reclame, la datele potrivite.</p></div>
+      <button data-act="camp-new" class="rounded-full border border-line bg-paper px-4 py-2.5 text-sm font-medium hover:bg-cream">+ Campanie nouă</button></div>
+    <div class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">${up.map(campCard).join('') || '<p class="text-sm text-muted">Nicio campanie.</p>'}</div>
+    ${past.length ? `<h2 class="text-xs uppercase tracking-[.12em] text-muted font-semibold mt-8 mb-2">Încheiate</h2>
+      <div class="grid gap-4" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))">${past.map(campCard).join('')}</div>` : ''}`;
+}
+function renderCampaign() {
+  const c = state.camp, v = $('#view');
+  const posts = postsOf(c), T = tasksForCamp(c), pr = TK.progress(T);
+  const free = state.posts.filter(p => !p.campaign_id);
+  v.innerHTML = `
+  <div class="flex flex-wrap items-center gap-3 mb-4"><a href="#campanii" class="text-sm text-muted hover:text-ink">← Campanii</a>
+    <span id="camp-save" class="text-xs text-muted"></span>
+    <button data-act="camp-del" class="ml-auto text-sm text-muted hover:text-blush-dark">Șterge campania</button></div>
+  <div class="flex flex-wrap gap-6 items-start">
+    <div class="flex-[999_1_600px] min-w-0 space-y-4">
+      <section class="bg-paper border border-line rounded-2xl p-5">
+        <div class="flex flex-wrap items-baseline gap-2 mb-1"><h1 class="font-serif text-3xl tracking-tight">${esc(c.name)}</h1>
+          <span class="ml-auto text-sm text-muted">${pr.d} din ${pr.n} gata</span></div>
+        <div class="h-2 rounded-full bg-[#EFE9DF] mb-2"><div class="h-full rounded-full bg-moss" style="width:${pr.pct}%"></div></div>
+        ${!c.occasion_date ? '<p class="text-sm text-[#7A4510]">Alege data ocaziei, în dreapta, ca să apară datele fiecărui pas.</p>' : ''}
+      </section>
+      ${PHASES.map(([label, test]) => { const rows = T.filter(test); return rows.length ? `
+        <section class="bg-paper border border-line rounded-2xl p-5">
+          <h2 class="text-xs uppercase tracking-[.12em] text-muted font-semibold">${label}</h2>
+          <ul class="divide-y divide-line">${rows.map(t => taskRow(t)).join('')}</ul></section>` : ''; }).join('')}
+    </div>
+    <aside class="flex-[1_1_340px] min-w-0 space-y-4">
+      <section class="bg-paper border border-line rounded-2xl p-5 space-y-3">
+        ${field('Ziua ocaziei', `<input data-cf="occasion_date" type="date" class="${inputCls}" value="${esc(c.occasion_date || '')}" />`)}
+        ${field('Ultima zi de comandă pentru livrare la timp', `<input data-cf="order_by" type="date" class="${inputCls}" value="${esc(c.order_by || '')}" />`)}
+        <p class="text-xs text-muted">Data-limită apare în textele pentru WhatsApp, newsletter și postări. Dacă o lași goală, e cu 3 zile înainte.</p>
+      </section>
+      <section class="bg-paper border border-line rounded-2xl p-5">
+        <h2 class="font-semibold mb-2">Articolele campaniei</h2>
+        ${posts.length ? `<ul class="divide-y divide-line">${posts.map(p => { const s = statusOf(p); return `<li class="flex items-center gap-2 py-2">
+          <a href="#post/${p.id}" class="flex-1 min-w-0 text-sm font-medium hover:underline">${esc(p.title || p.keyword)}</a>
+          <span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${s.cls}">${s.label}</span>
+          <button data-unlink="${p.id}" class="w-7 h-7 rounded-full text-muted hover:text-blush-dark hover:bg-blush-soft" aria-label="Scoate din campanie">×</button></li>`; }).join('')}</ul>` : '<p class="text-sm text-muted">Niciun articol încă.</p>'}
+        ${free.length ? `<select data-link class="${inputCls} mt-2"><option value="">+ leagă un articol…</option>${free.map(p => `<option value="${p.id}">${esc(p.title || p.keyword)}</option>`).join('')}</select>` : ''}
+      </section>
+      <section class="bg-paper border border-line rounded-2xl p-5">
+        ${field('Notițe', `<textarea data-cf="notes" rows="6" class="${inputCls}" placeholder="Ce s-a vândut, ce a lipsit, ce schimbi la anul…">${esc(c.notes || '')}</textarea>`)}
+      </section>
+    </aside>
+  </div>`;
+}
+async function saveCamp(c, patch) {
+  Object.assign(c, patch);
+  const el = $('#camp-save'); if (el) el.textContent = 'Se salvează…';
+  const { error } = await sb.from('blog_campaigns').update(patch).eq('id', c.id);
+  if (el) el.textContent = error ? 'Nu s-a salvat' : 'Salvat';
+  if (error) toast('Nu am putut salva campania.', 'err');
+}
+let campNoteTimer;
+$('#view').addEventListener('input', e => {
+  if (state.view !== 'camp' || e.target.dataset.cf !== 'notes') return;
+  clearTimeout(campNoteTimer); const c = state.camp, v = e.target.value;
+  campNoteTimer = setTimeout(() => saveCamp(c, { notes: v }), 700);
+});
+$('#view').addEventListener('change', async e => {
+  if (state.view !== 'camp') return;
+  const c = state.camp, t = e.target;
+  if (t.dataset.cf === 'occasion_date' || t.dataset.cf === 'order_by') { await saveCamp(c, { [t.dataset.cf]: t.value || null }); return renderCampaign(); }
+  if (t.matches('[data-link]') && t.value) {
+    const p = state.posts.find(x => x.id === t.value);
+    const { error } = await sb.from('blog_posts').update({ campaign_id: c.id }).eq('id', p.id);
+    if (error) return toast('Nu am putut lega articolul.', 'err');
+    p.campaign_id = c.id; renderCampaign();
+  }
+});
+$('#view').addEventListener('click', async e => {
+  if (state.view === 'camps' && e.target.closest('[data-act=camp-new]')) {
+    const r = await ask({
+      title: 'Campanie nouă', ok: 'Creează',
+      body: `<div class="space-y-3">${field('Numele', `<input name="name" class="${inputCls}" placeholder="Ex: Black Friday 2026" />`)}
+        <div class="grid grid-cols-2 gap-3">${field('Ziua ocaziei', `<input name="d" type="date" class="${inputCls}" />`)}${field('Comenzi până pe', `<input name="o" type="date" class="${inputCls}" />`)}</div></div>`,
+      collect: b => { const name = $('[name=name]', b).value.trim(); if (!name) { toast('Scrie numele.', 'err'); return false; } return { name, occasion_date: $('[name=d]', b).value || null, order_by: $('[name=o]', b).value || null }; },
+    });
+    if (!r) return;
+    const { data, error } = await sb.from('blog_campaigns').insert({ ...r, tasks: {} }).select().single();
+    if (error) return toast('Nu am putut crea campania.', 'err');
+    state.campaigns.push(data); location.hash = `#camp/${data.id}`;
+    return;
+  }
+  if (state.view !== 'camp') return;
+  const c = state.camp;
+  const un = e.target.closest('[data-unlink]');
+  if (un) {
+    const p = state.posts.find(x => x.id === un.dataset.unlink);
+    const { error } = await sb.from('blog_posts').update({ campaign_id: null }).eq('id', p.id);
+    if (error) return toast('Nu am putut scoate articolul.', 'err');
+    p.campaign_id = null; return renderCampaign();
+  }
+  if (e.target.closest('[data-act=camp-del]')) {
+    const ok = await ask({ title: `Ștergi „${c.name}”?`, ok: 'Șterge', danger: true, body: '<p class="text-sm text-muted">Dispar bifele și notițele campaniei. Articolele rămân în plan.</p>' });
+    if (!ok) return;
+    const { error } = await sb.from('blog_campaigns').delete().eq('id', c.id);
+    if (error) return toast('Nu am putut șterge campania.', 'err');
+    state.campaigns = state.campaigns.filter(x => x !== c);
+    state.posts.forEach(p => { if (p.campaign_id === c.id) p.campaign_id = null; });
+    location.hash = '#campanii';
+  }
+});
 
 // ================================================================ REZULTATE GOOGLE (Search Console)
 const fmtN = n => Math.round(n || 0).toLocaleString('ro-RO');
@@ -819,6 +1084,7 @@ function renderEditor() {
 
     <aside class="flex-[1_1_340px] min-w-0 space-y-4">
       <section id="seo-box" class="bg-paper border border-line rounded-2xl p-5"></section>
+      <section id="tasks-box" class="bg-paper border border-line rounded-2xl p-5"></section>
       <section class="bg-paper border border-line rounded-2xl p-5 space-y-3">
         <h2 class="font-semibold">Cum apare în Google</h2>
         <div id="gprev" class="border border-line rounded-xl p-3 font-[Arial,sans-serif]"></div>
@@ -861,6 +1127,7 @@ function updateSide() {
   $('#seo-box').innerHTML = seoHtml();
   $('#gprev').innerHTML = googleHtml();
   $('#pub-box').innerHTML = pubHtml();
+  renderTasksBox();
   const w = wordCount();
   $('#words').textContent = `${w} cuvinte · ${Math.max(1, Math.round(w / 220))} min de citit`;
   const st = (state.cur.seo_title || state.cur.title || '').length, sd = (state.cur.seo_description || '').length;
@@ -935,6 +1202,7 @@ $('#view').addEventListener('change', e => {
   }
   else if (id === 'f-month') p.month = e.target.value || null;
   else if (id === 'f-prio') p.priority = e.target.value || null;
+  else if (id === 'f-camp') { p.campaign_id = e.target.value || null; queueSave(); return renderTasksBox(); }
   else if (id === 'f-due') { p.due_date = e.target.value || null; if (p.due_date) {
     p.month = p.due_date.slice(0, 7);
     const sel = $('#f-month');
