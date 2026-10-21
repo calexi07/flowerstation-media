@@ -1602,8 +1602,9 @@ async function socialTexts(force = false) {
   p._social = r;
   return r;
 }
-function socialText(network) {
+function socialText(network, kind = 'photo') {
   const p = state.cur, s = p._social;
+  if (network === 'facebook' && kind === 'link') return `${s.facebook.trim()}\n\n👇 Citește articolul complet`;
   if (network === 'facebook') {
     const link = utm(p.shopify_url, 'facebook', p.handle);
     return `${s.facebook.trim()}${link ? `\n\n👉 Citește articolul: ${link}` : ''}`;
@@ -1628,6 +1629,15 @@ async function openSocial(network) {
   if (!imgs.length) return toast('Articolul nu are nicio poză. Alege întâi poza principală.', 'err');
   let img = imgs[0], fmt = N.formats[0][0];
   const live = p.status === 'published' && p.shopify_url;
+  // Facebook: „link” = postare cu previzualizarea articolului (poză + titlu + site); „photo” = doar poza cu textul
+  let kind = network === 'facebook' && live ? 'link' : 'photo';
+  const linkUrl = live ? utm(p.shopify_url, 'facebook', p.handle) : '';
+  const domain = (() => { try { return new URL(p.shopify_url).hostname.replace(/^www\./, '').toUpperCase(); } catch { return ''; } })();
+  const showKind = b => {
+    $$('[data-kind]', b).forEach(x => { const on = x.dataset.kind === kind; x.classList.toggle('bg-ink', on); x.classList.toggle('text-white', on); x.setAttribute('aria-pressed', on); });
+    $('#so-photo', b).hidden = kind === 'link';
+    $('#so-link', b).hidden = kind !== 'link';
+  };
   const max = network === 'instagram' ? 2200 : 5000;
   const preview = b => {
     const [w, h] = fmt.split('x').map(Number);
@@ -1641,10 +1651,22 @@ async function openSocial(network) {
     body: `<div class="space-y-4 max-h-[66vh] overflow-y-auto pr-1">
       ${!live ? '<p class="text-xs p-2.5 rounded-lg bg-blush-soft text-blush-dark">Articolul nu e publicat încă pe blog — publică-l înainte, ca linkul să meargă.</p>' : ''}
       <div><div class="flex justify-between items-end mb-1"><span class="text-sm font-semibold">Textul</span><span id="so-count" class="text-xs text-muted"></span></div>
-        <textarea id="so-text" rows="9" class="w-full rounded-lg border border-line px-3 py-2 text-sm leading-relaxed">${esc(socialText(network))}</textarea>
+        <textarea id="so-text" rows="9" class="w-full rounded-lg border border-line px-3 py-2 text-sm leading-relaxed">${esc(socialText(network, kind))}</textarea>
         <div class="flex flex-wrap gap-3 mt-1 text-xs"><button type="button" data-regen class="inline-flex items-center gap-1 text-moss hover:underline">${sparkle} Altă variantă</button><button type="button" data-copy class="text-muted hover:text-ink">Copiază textul</button>
         ${network === 'instagram' && live ? '<button type="button" data-copybio class="text-muted hover:text-ink">Copiază linkul pentru bio</button>' : ''}</div></div>
-      <div><p class="text-sm font-semibold mb-1.5">Poza</p>
+      ${network === 'facebook' ? `<div><p class="text-sm font-semibold mb-1.5">Tipul postării</p>
+        <div class="flex flex-wrap gap-1.5">
+          <button type="button" data-kind="link" ${live ? '' : 'disabled title="Publică întâi articolul pe blog"'} class="text-xs px-3 py-1.5 rounded-full border border-line disabled:opacity-40">Link cu previzualizare (recomandat)</button>
+          <button type="button" data-kind="photo" class="text-xs px-3 py-1.5 rounded-full border border-line">Doar poză</button>
+        </div></div>
+      <div id="so-link" hidden>
+        <div class="mx-auto rounded-xl overflow-hidden border border-line bg-paper" style="max-width:320px">
+          ${p.image_url ? `<img src="${esc(sizedImg(p.image_url, 700))}" alt="" class="w-full object-cover" style="aspect-ratio:1.91/1" />` : '<div class="bg-cream grid place-items-center text-xs text-muted" style="aspect-ratio:1.91/1">fără poză principală</div>'}
+          <div class="px-3 py-2 bg-cream/60"><p class="text-[11px] text-muted">${esc(domain)}</p><p class="text-sm font-semibold leading-snug">${esc(p.seo_title || p.title)}</p></div>
+        </div>
+        <p class="text-xs text-muted mt-2">Poza și titlul din card le ia Facebook din articol: poza principală și titlul pentru Google. Dacă vrei altă poză, schimbă poza principală și apasă „Actualizează pe blog”.</p>
+      </div>` : ''}
+      <div id="so-photo"><p class="text-sm font-semibold mb-1.5">Poza</p>
         <div class="flex gap-2 overflow-x-auto pb-1 mb-2">${imgs.map(u => `<button type="button" data-img="${esc(u)}" class="w-16 h-16 shrink-0 rounded-lg overflow-hidden border border-line ring-moss"><img src="${esc(sizedImg(u, 200))}" alt="" class="w-full h-full object-cover" /></button>`).join('')}</div>
         <div class="flex flex-wrap gap-1.5 mb-2">${N.formats.map(([f, l]) => `<button type="button" data-fmt="${f}" class="text-xs px-3 py-1.5 rounded-full border border-line">${l} ${f.replace('x', '×')}</button>`).join('')}</div>
         <div id="so-prev" class="w-full max-w-[260px] mx-auto rounded-xl overflow-hidden bg-cream"><img alt="" class="w-full h-full object-cover" /></div>
@@ -1658,9 +1680,11 @@ async function openSocial(network) {
       const count = () => { const n = ta.value.length, tags = (ta.value.match(/#[\p{L}\p{N}_]+/gu) || []).length;
         $('#so-count', b).textContent = `${n}/${max} caractere${network === 'instagram' ? ` · ${tags}/30 hashtag-uri` : ''}`;
         $('#so-count', b).className = `text-xs ${n > max || tags > 30 ? 'text-blush-dark font-semibold' : 'text-muted'}`; };
-      ta.addEventListener('input', count); count(); preview(b);
+      ta.addEventListener('input', count); count(); preview(b); if (network === 'facebook') showKind(b);
       b.addEventListener('click', async e => {
         const t = e.target;
+        const kb = t.closest('[data-kind]');
+        if (kb && !kb.disabled) { kind = kb.dataset.kind; ta.value = socialText(network, kind); count(); return showKind(b); }
         if (t.closest('[data-img]')) { img = t.closest('[data-img]').dataset.img; return preview(b); }
         if (t.closest('[data-fmt]')) { fmt = t.closest('[data-fmt]').dataset.fmt; return preview(b); }
         if (t.closest('[data-copy]')) { try { await navigator.clipboard.writeText(ta.value); toast('Textul a fost copiat.'); } catch {} return; }
@@ -1677,6 +1701,13 @@ async function openSocial(network) {
         if (ta.value.length > max) { res.className = 'text-sm text-blush-dark'; res.textContent = 'Textul e prea lung.'; return; }
         pb.disabled = true; const label = pb.innerHTML; pb.innerHTML = `${spinner} Public…`; res.textContent = '';
         try {
+          if (kind === 'link') {
+            const r = await callFn('social', { action: 'publish', network, kind: 'link', link: linkUrl, text: ta.value, postId: p.id });
+            if (!r.ok) throw new Error(r.error || 'Publicarea nu a reușit.');
+            res.className = 'text-sm p-3 rounded-xl bg-moss-soft text-moss-dark';
+            res.innerHTML = `Publicat pe ${N.name}! ${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener" class="font-semibold underline">Vezi postarea ↗</a>` : ''}`;
+            pb.hidden = true; renderSocialBox(); return;
+          }
           const [w, h] = fmt.split('x').map(Number);
           const blob = await cropBlob(img, w, h);
           const path = `social/${monthKey(new Date())}/${p.handle || 'articol'}-${network}-${Date.now().toString(36)}.jpg`;
